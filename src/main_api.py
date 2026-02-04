@@ -1,4 +1,4 @@
-"""독서로 ISBN 존재여부 자동 검증 메인 모듈"""
+"""독서로 ISBN 존재여부 자동 검증 메인 모듈 - API 버전"""
 
 from __future__ import annotations
 
@@ -13,11 +13,10 @@ from src.config import Settings
 from src.logger import setup_logging, get_logger
 from src.cache import ResultCache
 from src.aladin_api import AladinClient
-from src.read365_bot import Read365Bot
+from src.read365_api import Read365APIClient, get_prov_code
 from src.excel_io import read_input_excel, init_output_df, write_output_row, save_excel
 from src.exceptions import (
     BookProjectError,
-    SchoolNotFoundError,
     ISBNSearchError,
     MissingConfigError,
 )
@@ -27,12 +26,11 @@ logger = get_logger(__name__)
 
 def parse_args() -> argparse.Namespace:
     """커맨드라인 인수를 파싱합니다."""
-    p = argparse.ArgumentParser(description="독서로 ISBN 존재여부 자동 검증")
+    p = argparse.ArgumentParser(description="독서로 ISBN 존재여부 자동 검증 (API 버전)")
     p.add_argument("--input", required=True, help="입력 엑셀 경로(도서견적서.xlsx)")
     p.add_argument("--output", required=True, help="출력 엑셀 경로")
     p.add_argument("--region", default=None, help="지역명 (기본 .env)")
     p.add_argument("--level", default=None, help="학교급 (기본 .env)")
-    p.add_argument("--headless", default=None, help="true/false (기본 .env)")
     p.add_argument("--log-file", default=None, help="로그 파일 경로")
     p.add_argument("--log-dir", default="logs", help="로그 디렉토리 (기본: logs)")
     p.add_argument("--verbose", "-v", action="store_true", help="상세 로그 출력")
@@ -53,22 +51,23 @@ def main() -> int:
         console=True,
     )
 
-    logger.info("=== 독서로 ISBN 검증 시작 ===")
+    logger.info("=== 독서로 ISBN 검증 시작 (API 버전) ===")
 
     region = args.region or settings.region_name
     level = args.level or settings.school_level
-    headless = (
-        settings.headless
-        if args.headless is None
-        else str(args.headless).lower() in ("1", "true", "yes", "y", "on")
-    )
 
     if not settings.aladin_ttb_key:
         logger.error("ALADIN_TTB_KEY가 설정되어 있지 않습니다(.env)")
         print("ERROR: ALADIN_TTB_KEY 가 설정되어 있지 않습니다(.env).", file=sys.stderr)
         return 2
 
-    logger.info(f"설정: region={region}, level={level}, headless={headless}")
+    # 지역 코드 변환
+    prov_code = get_prov_code(region)
+    if not prov_code:
+        logger.warning(f"지역 코드를 찾을 수 없음: {region}, 전국 검색으로 진행")
+        prov_code = None
+
+    logger.info(f"설정: region={region} (code={prov_code}), level={level}")
 
     df_in = read_input_excel(args.input)
     n = len(df_in)
@@ -83,21 +82,12 @@ def main() -> int:
         request_timeout=settings.request_timeout
     )
 
-    bot = Read365Bot(
-        headless=headless,
-        window_width=settings.window_width,
-        window_height=settings.window_height,
-        implicit_wait=settings.selenium_implicit_wait,
-        explicit_wait=settings.selenium_explicit_wait,
-        scroll_repeats=settings.scroll_repeats,
-        scroll_interval_ms=settings.scroll_interval_ms,
+    api_client = Read365APIClient(
+        timeout=settings.request_timeout,
+        max_retries=3,
     )
 
     try:
-        bot.start()
-        bot.select_our_school_tab()
-        bot.set_region_and_level(region, level)
-
         batch_every = settings.batch_save_every
 
         for i in tqdm(range(n), desc="Processing", unit="book"):
@@ -151,28 +141,62 @@ def main() -> int:
                     logger.debug(f"{log_prefix} | 검색 캐시 히트: {exists_mark}")
                     print(f"{log_prefix} | ISBN={isbn13} -> items={items} {exists_mark} (캐시)")
                 else:
-                    # === Read365 검색 ===
+                    # === Read365 API 검색 (여러 지역) ===
                     try:
-                        current_url, matched_school_name = bot.search_school(school, school_level=level)
-                        bot.search_isbn(isbn13)
-                        bot.scroll_results()
-                        items = bot.count_items()
-                        exists = items > 0
+                        # 주요 지역 코드 리스트 (전국 검색은 지원 안 됨)
+                        major_regions = ["B10", "C10", "D10", "E10", "F10", "G10", "G10"]  # 서울, 부산, 대구, 인천, 광주, 대전, 경기
+                        
+                        all_books = []
+                        total_items = 0
+                        
+                        # 여러 지역에서 검색
+                        for region_code in major_regions:
+                            result = api_client.search_isbn(
+                                isbn=isbn13,
+                                prov_code=region_code,
+                                page=1,
+                                page_size=1000,
+                            )
+                            
+                            total_items += result["total_count"]
+                            all_books.extend(result["books"])
+                        
+                        # 특정 학교에서 보유한 도서 찾기
+                        school_books = []
+                        if all_books:
+                            school_name_normalized = school.replace(" ", "").lower()
+                            for book in all_books:
+                                book_school = book.get("schoolName", "")
+                                book_school_normalized = book_school.replace(" ", "").lower()
+                                
+                                # 학교명이 포함되어 있는지 확인
+                                if school_name_normalized in book_school_normalized:
+                                    school_books.append(book)
+                                    if not matched_school_name:
+                                        matched_school_name = book_school
+                        
+                        school_items = len(school_books)
+                        exists = school_items > 0
                         exists_mark = "✅" if exists else "❌"
-                        cache.set_search(school, isbn13, exists, items, matched_school_name)
-                        print(f"{log_prefix} | ISBN={isbn13} -> items={items} {exists_mark}")
-                    except SchoolNotFoundError as e:
-                        reason = f"학교 검색 실패: {e}"
-                        cache.set_search(school, isbn13, False, 0, error=reason)
-                        logger.warning(f"{log_prefix} | {reason}")
-                        print(f"{log_prefix} | ISBN={isbn13} -> items=0 ❌ (학교 미발견)")
+                        
+                        cache.set_search(school, isbn13, exists, school_items, matched_school_name)
+                        
+                        if exists:
+                            print(f"{log_prefix} | ISBN={isbn13} -> {matched_school_name}에 {school_items}권 보유 ✅")
+                        else:
+                            print(f"{log_prefix} | ISBN={isbn13} -> {school}에 없음 (주요지역 {total_items}권) ❌")
+                            if total_items == 0:
+                                reason = "주요 지역에 등록된 도서 없음"
+                            else:
+                                reason = f"{school}에 없음 (타 학교 {total_items}권 보유)"
+                        
                     except ISBNSearchError as e:
                         reason = f"ISBN 검색 실패: {e}"
                         cache.set_search(school, isbn13, False, 0, error=reason)
                         logger.warning(f"{log_prefix} | {reason}")
                         print(f"{log_prefix} | ISBN={isbn13} -> items=0 ❌ (검색 오류)")
                     except Exception as e:
-                        reason = f"검색 오류/미로딩: {e}"
+                        reason = f"검색 오류: {e}"
                         cache.set_search(school, isbn13, False, 0, error=reason)
                         logger.error(f"{log_prefix} | 예외: {e}")
                         print(f"{log_prefix} | ISBN={isbn13} -> items=0 ❌ (오류: {e})")
@@ -224,7 +248,7 @@ def main() -> int:
         return 1
 
     finally:
-        bot.close()
+        api_client.close()
 
 
 if __name__ == "__main__":

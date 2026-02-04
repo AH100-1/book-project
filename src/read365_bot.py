@@ -1,3 +1,5 @@
+"""Read365 (독서로) 웹 자동화 봇"""
+
 from __future__ import annotations
 
 import os
@@ -11,10 +13,42 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, NoSuchFrameException
+from selenium.common.exceptions import (
+    TimeoutException,
+    NoSuchFrameException,
+    WebDriverException,
+    StaleElementReferenceException,
+)
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception_type,
+    before_sleep_log,
+)
+
+from src.logger import get_logger
+from src.exceptions import (
+    BrowserInitError,
+    SchoolNotFoundError,
+    ISBNSearchError,
+    PageLoadError,
+    ElementNotFoundError,
+)
+
+logger = get_logger(__name__)
+
+# 재시도 가능한 Selenium 예외들
+RETRYABLE_EXCEPTIONS = (
+    TimeoutException,
+    WebDriverException,
+    StaleElementReferenceException,
+)
 
 
 class Read365Bot:
+    """Read365 웹사이트 자동화 봇"""
+
     BASE_URL = "https://read365.edunet.net/SchoolSearch"
 
     def __init__(
@@ -26,7 +60,7 @@ class Read365Bot:
         explicit_wait: int = 15,
         scroll_repeats: int = 7,
         scroll_interval_ms: int = 400,
-        verbose: bool = True,
+        max_retries: int = 3,
     ) -> None:
         self.headless = headless
         self.window_width = window_width
@@ -35,39 +69,50 @@ class Read365Bot:
         self.explicit_wait = explicit_wait
         self.scroll_repeats = scroll_repeats
         self.scroll_interval_ms = scroll_interval_ms
-        self.verbose = verbose
+        self.max_retries = max_retries
         self.driver: Optional[webdriver.Chrome] = None
 
-    def _log(self, msg: str) -> None:
-        if self.verbose:
-            print(f"[READ365] {msg}")
+        logger.debug(
+            f"Read365Bot 초기화 (headless={headless}, "
+            f"size={window_width}x{window_height}, retries={max_retries})"
+        )
 
     def start(self) -> None:
+        """브라우저를 시작하고 페이지를 로드합니다."""
         options = Options()
         if self.headless:
             options.add_argument("--headless=new")
         options.add_argument(f"--window-size={self.window_width},{self.window_height}")
         options.add_argument("--disable-gpu")
         options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+
         chrome_binary = os.getenv("CHROME_BINARY")
         if chrome_binary:
             options.binary_location = chrome_binary
-        # 1) Selenium Manager 시도 (권장; Selenium 4.10+)
+
+        # 1) Selenium Manager 시도 (Selenium 4.10+)
         try:
-            self._log("init driver via Selenium Manager")
+            logger.info("Selenium Manager로 드라이버 초기화 시도")
             self.driver = webdriver.Chrome(options=options)
         except Exception as e1:
             # 2) webdriver-manager 폴백
-            self._log(f"Selenium Manager failed: {e1}; fallback to webdriver-manager")
-            service = ChromeService(ChromeDriverManager().install())
-            self.driver = webdriver.Chrome(service=service, options=options)
+            logger.warning(f"Selenium Manager 실패: {e1}; webdriver-manager로 재시도")
+            try:
+                service = ChromeService(ChromeDriverManager().install())
+                self.driver = webdriver.Chrome(service=service, options=options)
+            except Exception as e2:
+                logger.error(f"브라우저 초기화 완전 실패: {e2}")
+                raise BrowserInitError(f"브라우저 초기화 실패: {e2}")
+
         self.driver.implicitly_wait(self.implicit_wait)
-        self._log("open page")
+        logger.info(f"페이지 로드: {self.BASE_URL}")
         self.driver.get(self.BASE_URL)
         self._wait_page_ready()
         self._try_switch_into_form_iframe()
 
     def close(self) -> None:
+        """브라우저를 종료합니다."""
         if self.driver:
             try:
                 self.driver.switch_to.default_content()
@@ -75,13 +120,16 @@ class Read365Bot:
                 pass
             self.driver.quit()
             self.driver = None
+            logger.info("브라우저 종료됨")
 
-    def _wait(self):
+    def _wait(self) -> WebDriverWait:
+        """WebDriverWait 인스턴스를 반환합니다."""
         if not self.driver:
             raise RuntimeError("driver not started")
         return WebDriverWait(self.driver, self.explicit_wait)
 
     def _wait_page_ready(self) -> None:
+        """페이지 로드 완료까지 대기합니다."""
         if not self.driver:
             return
         WebDriverWait(self.driver, max(self.explicit_wait, 15)).until(
@@ -89,6 +137,7 @@ class Read365Bot:
         )
 
     def _try_switch_into_form_iframe(self) -> None:
+        """폼이 있는 iframe으로 전환을 시도합니다."""
         if not self.driver:
             return
         try:
@@ -99,7 +148,7 @@ class Read365Bot:
                     self.driver.switch_to.frame(fr)
                     selects = self.driver.find_elements(By.TAG_NAME, "select")
                     if selects:
-                        self._log("entered iframe with form")
+                        logger.debug("폼이 있는 iframe으로 전환")
                         return
                 except Exception:
                     continue
@@ -110,6 +159,7 @@ class Read365Bot:
             pass
 
     def _try_js_click(self, selector: str) -> bool:
+        """JavaScript로 요소 클릭을 시도합니다."""
         if not self.driver:
             return False
         try:
@@ -124,6 +174,7 @@ class Read365Bot:
         return False
 
     def _select_option_by_visible_text_js(self, select_css: str, text: str) -> bool:
+        """JavaScript로 select 옵션을 선택합니다."""
         if not self.driver:
             return False
         script = r"""
@@ -142,11 +193,20 @@ class Read365Bot:
         except Exception:
             return False
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=5),
+        retry=retry_if_exception_type(RETRYABLE_EXCEPTIONS),
+        before_sleep=before_sleep_log(logger, "WARNING"),
+        reraise=True,
+    )
     def select_our_school_tab(self) -> bool:
+        """'우리학교 도서검색' 탭을 선택합니다."""
         wait = self._wait()
         self._wait_page_ready()
         self._try_switch_into_form_iframe()
-        self._log("click tab: 우리학교 도서검색")
+        logger.debug("탭 클릭: 우리학교 도서검색")
+
         selectors_xpath = [
             "//a[contains(., '우리학교 도서검색') or contains(., '우리 학교 도서검색')]",
             "//button[contains(., '우리학교 도서검색') or contains(., '우리 학교 도서검색')]",
@@ -156,86 +216,144 @@ class Read365Bot:
             try:
                 tab = wait.until(EC.element_to_be_clickable((By.XPATH, xp)))
                 tab.click()
+                logger.info("탭 선택 완료: 우리학교 도서검색")
                 return True
             except Exception:
                 continue
-        for css in [
-            "a[href*='SchoolSearch']",
-            "#ourSchoolTab a",
-            "li.tab a",
-        ]:
+
+        for css in ["a[href*='SchoolSearch']", "#ourSchoolTab a", "li.tab a"]:
             if self._try_js_click(css):
+                logger.info("탭 선택 완료 (JS): 우리학교 도서검색")
                 return True
-        self._log("tab not found; continue anyway")
+
+        logger.warning("탭을 찾을 수 없음; 현재 페이지에서 계속 진행")
         return False
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=5),
+        retry=retry_if_exception_type(RETRYABLE_EXCEPTIONS),
+        before_sleep=before_sleep_log(logger, "WARNING"),
+        reraise=True,
+    )
     def set_region_and_level(self, region_name: str, school_level: str) -> bool:
+        """지역과 학교급을 설정합니다."""
         wait = self._wait()
         self._wait_page_ready()
         self._try_switch_into_form_iframe()
-        self._log(f"select region/level: {region_name} / {school_level}")
+        logger.debug(f"지역/학교급 설정: {region_name} / {school_level}")
+
         try:
             region = wait.until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, "select#regionSelect, select[name='region'], form select[name='region']"))
+                EC.presence_of_element_located((
+                    By.CSS_SELECTOR,
+                    "select#regionSelect, select[name='region'], form select[name='region']"
+                ))
             )
             level = wait.until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, "select#levelSelect, select[name='level'], form select[name='level']"))
+                EC.presence_of_element_located((
+                    By.CSS_SELECTOR,
+                    "select#levelSelect, select[name='level'], form select[name='level']"
+                ))
             )
             from selenium.webdriver.support.ui import Select
-
             Select(region).select_by_visible_text(region_name)
             Select(level).select_by_visible_text(school_level)
+            logger.info(f"지역/학교급 설정 완료: {region_name} / {school_level}")
             return True
         except TimeoutException:
             pass
         except Exception:
             pass
-        hit_region = self._select_option_by_visible_text_js("select#regionSelect, select[name='region']", region_name)
-        hit_level = self._select_option_by_visible_text_js("select#levelSelect, select[name='level']", school_level)
+
+        hit_region = self._select_option_by_visible_text_js(
+            "select#regionSelect, select[name='region']", region_name
+        )
+        hit_level = self._select_option_by_visible_text_js(
+            "select#levelSelect, select[name='level']", school_level
+        )
         if hit_region and hit_level:
+            logger.info(f"지역/학교급 설정 완료 (JS): {region_name} / {school_level}")
             return True
+
         try:
             selects = self.driver.find_elements(By.TAG_NAME, "select") if self.driver else []
             if len(selects) >= 2:
                 from selenium.webdriver.support.ui import Select
-
                 Select(selects[0]).select_by_visible_text(region_name)
                 Select(selects[1]).select_by_visible_text(school_level)
+                logger.info(f"지역/학교급 설정 완료 (폴백): {region_name} / {school_level}")
                 return True
         except Exception:
             pass
-        self._log("region/level select failed")
+
+        logger.error(f"지역/학교급 설정 실패: {region_name} / {school_level}")
         return False
 
     def _normalize(self, s: str) -> str:
+        """문자열 정규화 - 공백 제거"""
         return "".join(s.split())
 
-    def search_school(self, school_name: str, school_level: Optional[str] = None) -> Tuple[Optional[str], Optional[str]]:
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=5),
+        retry=retry_if_exception_type(RETRYABLE_EXCEPTIONS),
+        before_sleep=before_sleep_log(logger, "WARNING"),
+        reraise=True,
+    )
+    def search_school(
+        self, school_name: str, school_level: Optional[str] = None
+    ) -> Tuple[Optional[str], Optional[str]]:
+        """
+        학교를 검색하고 선택합니다.
+
+        Returns:
+            (현재 URL, 매칭된 학교명) 튜플
+        """
         wait = self._wait()
         self._wait_page_ready()
         self._try_switch_into_form_iframe()
-        self._log(f"search school: {school_name}")
+        logger.debug(f"학교 검색: {school_name}")
+
         try:
             input_box = wait.until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, "input#schoolName, input[name='schoolName'], input[name='school_name']"))
+                EC.presence_of_element_located((
+                    By.CSS_SELECTOR,
+                    "input#schoolName, input[name='schoolName'], input[name='school_name']"
+                ))
             )
             input_box.clear()
             input_box.send_keys(school_name)
+
             search_btn = wait.until(
-                EC.element_to_be_clickable((By.XPATH, "//button[contains(., '검색') and not(contains(., 'ISBN'))]"))
+                EC.element_to_be_clickable((
+                    By.XPATH,
+                    "//button[contains(., '검색') and not(contains(., 'ISBN'))]"
+                ))
             )
             old_url = self.driver.current_url if self.driver else ""
             search_btn.click()
-            # 결과 목록에서 우선순위: 1) 정확히 '학교명+학교급' 포함, 2) '학교명' 포함, 3) 첫 항목
+
+            # 결과 목록에서 매칭
             want_full = (school_name or "").strip()
             if school_level and school_level not in want_full:
-                want_full = f"{want_full}{school_level.strip()}"  # 예: 금남초 + 초등학교 → 금남초등학교
+                want_full = f"{want_full}{school_level.strip()}"
             want_full_norm = self._normalize(want_full)
             want_name_norm = self._normalize(school_name or "")
             matched_text: Optional[str] = None
+
             try:
-                wait.until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, "ul#schoolList li, .school-list li, ul.search-result li")))
-                candidates = (self.driver.find_elements(By.CSS_SELECTOR, "ul#schoolList li, .school-list li, ul.search-result li") if self.driver else [])
+                wait.until(EC.presence_of_all_elements_located((
+                    By.CSS_SELECTOR,
+                    "ul#schoolList li, .school-list li, ul.search-result li"
+                )))
+                candidates = (
+                    self.driver.find_elements(
+                        By.CSS_SELECTOR,
+                        "ul#schoolList li, .school-list li, ul.search-result li"
+                    ) if self.driver else []
+                )
+
                 target = None
                 # 1) 정확 매칭(공백 무시)
                 for li in candidates:
@@ -244,6 +362,7 @@ class Read365Bot:
                         target = li
                         matched_text = text
                         break
+
                 # 2) 부분 매칭(학교명만)
                 if not target:
                     for li in candidates:
@@ -252,10 +371,12 @@ class Read365Bot:
                             target = li
                             matched_text = text
                             break
+
                 # 3) 첫 항목 폴백
                 if not target and candidates:
                     target = candidates[0]
                     matched_text = target.text.strip()
+
                 if target is not None:
                     link = None
                     try:
@@ -270,57 +391,88 @@ class Read365Bot:
                     else:
                         target.click()
             except TimeoutException:
-                self._log("no school search result; continue on current page")
-            # URL 변경 대기 (최대 10초)
+                logger.warning(f"학교 검색 결과 없음: {school_name}")
+
+            # URL 변경 대기
             try:
                 WebDriverWait(self.driver, 10).until(lambda d: d.current_url != old_url)
             except Exception:
                 pass
-            current = self.driver.current_url if self.driver else None
-            self._log(f"at URL: {current} | matched: {matched_text}")
-            return current, matched_text
-        except Exception as e:
-            self._log(f"search school failed: {e}")
-            return None, None
 
+            current = self.driver.current_url if self.driver else None
+            logger.info(f"학교 검색 완료: {matched_text} (URL: {current})")
+            return current, matched_text
+
+        except Exception as e:
+            logger.error(f"학교 검색 실패: {school_name} - {e}")
+            raise SchoolNotFoundError(school_name)
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=5),
+        retry=retry_if_exception_type(RETRYABLE_EXCEPTIONS),
+        before_sleep=before_sleep_log(logger, "WARNING"),
+        reraise=True,
+    )
     def search_isbn(self, isbn13: str) -> bool:
+        """ISBN으로 도서를 검색합니다."""
         wait = self._wait()
         self._wait_page_ready()
         self._try_switch_into_form_iframe()
-        self._log(f"search ISBN: {isbn13}")
+        logger.debug(f"ISBN 검색: {isbn13}")
+
         try:
             isbn_input = wait.until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, "input#isbn, input[name='isbn']"))
+                EC.presence_of_element_located((
+                    By.CSS_SELECTOR,
+                    "input#isbn, input[name='isbn']"
+                ))
             )
             isbn_input.clear()
             isbn_input.send_keys(isbn13)
+
             btn = wait.until(
-                EC.element_to_be_clickable((By.XPATH, "//button[contains(., 'ISBN') and contains(., '검색')]"))
+                EC.element_to_be_clickable((
+                    By.XPATH,
+                    "//button[contains(., 'ISBN') and contains(., '검색')]"
+                ))
             )
             btn.click()
+            logger.info(f"ISBN 검색 완료: {isbn13}")
             return True
+
         except Exception as e:
-            self._log(f"search ISBN failed: {e}")
-            return False
+            logger.error(f"ISBN 검색 실패: {isbn13} - {e}")
+            raise ISBNSearchError(isbn13, str(e))
 
     def scroll_results(self) -> None:
+        """검색 결과를 스크롤하여 모든 항목을 로드합니다."""
         if not self.driver:
             return
-        self._log("scroll results")
+        logger.debug(f"결과 스크롤 ({self.scroll_repeats}회)")
         for _ in range(self.scroll_repeats):
             self.driver.execute_script("window.scrollBy(0, document.body.scrollHeight);")
             time.sleep(self.scroll_interval_ms / 1000.0)
 
+    @retry(
+        stop=stop_after_attempt(2),
+        wait=wait_exponential(multiplier=0.5, min=0.5, max=2),
+        retry=retry_if_exception_type(RETRYABLE_EXCEPTIONS),
+        reraise=True,
+    )
     def count_items(self) -> int:
+        """검색 결과의 도서 개수를 반환합니다."""
         wait = self._wait()
         try:
             items = wait.until(
-                EC.presence_of_all_elements_located((By.CSS_SELECTOR, "ul.book-list.list-type.list > li, ul.book-list > li"))
+                EC.presence_of_all_elements_located((
+                    By.CSS_SELECTOR,
+                    "ul.book-list.list-type.list > li, ul.book-list > li"
+                ))
             )
             count = len(items)
-            self._log(f"items={count}")
+            logger.info(f"검색 결과: {count}권")
             return count
         except TimeoutException:
-            self._log("items=0 (timeout)")
+            logger.debug("검색 결과 없음 (타임아웃)")
             return 0
-

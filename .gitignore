@@ -27,6 +27,16 @@ build/
 *_결과_*.xlsx
 *_중간.xlsx
 도서견적서_ISBN_*.xlsx
+결과_*.xlsx
+*_테스트.xlsx
+
+# 패키지 파일
+*.deb
+
+# Node.js
+node_modules/
+.next/
+out/
 
 # IDE 설정
 .vscode/
