@@ -6,6 +6,20 @@ import * as Fuzzball from 'fuzzball';
 
 const ALADIN_BASE_URL = 'https://www.aladin.co.kr/ttb/api/ItemSearch.aspx';
 
+/**
+ * 검색용 제목 정규화 - 특수문자 제거
+ */
+function normalizeTitle(title: string): string {
+  return title
+    // 괄호와 내용 제거: (2학년), [특별판] 등
+    .replace(/[(\[][^)\]]*[)\]]/g, ' ')
+    // 특수문자를 공백으로: . : - _ 등
+    .replace(/[.:;,\-_]/g, ' ')
+    // 연속 공백 정리
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 interface AladinBook {
   title: string;
   author: string;
@@ -27,9 +41,12 @@ export async function searchISBNByTitleAuthor(
     return { isbn13: null, error: '빈 제목' };
   }
 
+  // 검색용 제목 정규화 (괄호, 특수문자 제거)
+  const normalizedTitle = normalizeTitle(title);
+
   const params = new URLSearchParams({
     TTBKey: ttbKey,
-    Query: title,
+    Query: normalizedTitle,
     QueryType: 'Title',
     MaxResults: '20',
     start: '1',
