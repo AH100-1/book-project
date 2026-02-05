@@ -149,17 +149,15 @@ def main() -> int:
                         all_books = []
                         total_items = 0
                         
-                        # 여러 지역에서 검색
+                        # 여러 지역에서 검색 (모든 페이지)
                         for region_code in major_regions:
-                            result = api_client.search_isbn(
+                            books = api_client.search_isbn_all_pages(
                                 isbn=isbn13,
                                 prov_code=region_code,
-                                page=1,
-                                page_size=1000,
                             )
-                            
-                            total_items += result["total_count"]
-                            all_books.extend(result["books"])
+
+                            total_items += len(books)
+                            all_books.extend(books)
                         
                         # 특정 학교에서 보유한 도서 찾기
                         school_books = []

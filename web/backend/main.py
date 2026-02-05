@@ -255,17 +255,15 @@ async def search_book(request: BookSearchRequest):
 
         for region_code in search_regions:
             try:
-                result = await asyncio.get_event_loop().run_in_executor(
+                books = await asyncio.get_event_loop().run_in_executor(
                     executor,
-                    lambda rc=region_code: api_client.search_isbn(
+                    lambda rc=region_code: api_client.search_isbn_all_pages(
                         isbn=request.isbn,
                         prov_code=rc,
-                        page=1,
-                        page_size=500,
                     )
                 )
-                total_items += result["total_count"]
-                all_books.extend(result["books"])
+                total_items += len(books)
+                all_books.extend(books)
             except Exception as e:
                 logger.warning(f"지역 {region_code} 검색 실패: {e}")
                 continue
@@ -434,17 +432,15 @@ async def run_verification_api(job_id: str):
 
                         for region_code in search_regions:
                             try:
-                                result = await asyncio.get_event_loop().run_in_executor(
+                                books = await asyncio.get_event_loop().run_in_executor(
                                     executor,
-                                    lambda rc=region_code: api_client.search_isbn(
+                                    lambda rc=region_code: api_client.search_isbn_all_pages(
                                         isbn=isbn13,
                                         prov_code=rc,
-                                        page=1,
-                                        page_size=500,
                                     )
                                 )
-                                total_items += result["total_count"]
-                                all_books.extend(result["books"])
+                                total_items += len(books)
+                                all_books.extend(books)
                             except Exception as e:
                                 logger.warning(f"지역 {region_code} 검색 실패: {e}")
                                 continue
