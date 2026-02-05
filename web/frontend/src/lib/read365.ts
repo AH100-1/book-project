@@ -149,6 +149,37 @@ export async function searchISBN(
   }
 }
 
+/**
+ * ISBN으로 모든 페이지를 검색하여 전체 결과 반환
+ */
+export async function searchISBNAllPages(
+  isbn: string,
+  provCode?: string | null
+): Promise<Read365Book[]> {
+  const allBooks: Read365Book[] = [];
+  let page = 1;
+
+  while (true) {
+    const result = await searchISBN(isbn, provCode, page, 100);
+
+    if (result.books.length === 0) {
+      break;
+    }
+
+    allBooks.push(...result.books);
+
+    if (page >= result.totalPages) {
+      break;
+    }
+
+    page++;
+    // API 부하 방지
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+
+  return allBooks;
+}
+
 export async function searchISBNMultiRegion(
   isbn: string,
   primaryRegion?: string | null,
@@ -179,9 +210,10 @@ export async function searchISBNMultiRegion(
 
   for (const regionCode of searchRegions) {
     try {
-      const result = await searchISBN(isbn, regionCode, 1, 500);
-      totalCount += result.totalCount;
-      allBooks.push(...result.books);
+      // 모든 페이지 가져오기
+      const books = await searchISBNAllPages(isbn, regionCode);
+      totalCount += books.length;
+      allBooks.push(...books);
     } catch (error) {
       console.warn(`지역 ${regionCode} 검색 실패:`, error);
     }
