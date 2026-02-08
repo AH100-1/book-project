@@ -183,7 +183,7 @@ export async function searchISBNAllPages(
 export async function searchISBNMultiRegion(
   isbn: string,
   primaryRegion?: string | null,
-  maxRegions: number = 6
+  maxRegions: number = 17
 ): Promise<{
   totalCount: number;
   books: Read365Book[];
@@ -205,17 +205,18 @@ export async function searchISBNMultiRegion(
     }
   }
 
+  // 모든 지역 병렬 검색
+  const results = await Promise.allSettled(
+    searchRegions.map((regionCode) => searchISBNAllPages(isbn, regionCode))
+  );
+
   let totalCount = 0;
   const allBooks: Read365Book[] = [];
 
-  for (const regionCode of searchRegions) {
-    try {
-      // 모든 페이지 가져오기
-      const books = await searchISBNAllPages(isbn, regionCode);
-      totalCount += books.length;
-      allBooks.push(...books);
-    } catch (error) {
-      console.warn(`지역 ${regionCode} 검색 실패:`, error);
+  for (const result of results) {
+    if (result.status === 'fulfilled') {
+      totalCount += result.value.length;
+      allBooks.push(...result.value);
     }
   }
 
