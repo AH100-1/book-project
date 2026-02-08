@@ -18,6 +18,7 @@ interface ResultRow {
   ISBN13: string;
   검색학교: string;
   존재여부: string;
+  독서로: string;
   사유: string;
 }
 
@@ -34,6 +35,24 @@ interface ManualBook {
 
 type Mode = "file" | "manual";
 
+// 권수 범위 확장: ".1-2" → ["제목 1", "제목 2"], ".1~3" → ["제목 1", "제목 2", "제목 3"]
+function expandVolumeRange(title: string): string[] {
+  const match = title.match(/\s*[.]\s*(\d+)\s*[-~]\s*(\d+)\s*$/);
+  if (match) {
+    const base = title.slice(0, match.index!).trim();
+    const start = parseInt(match[1]);
+    const end = parseInt(match[2]);
+    if (end >= start && end - start < 20) {
+      const titles: string[] = [];
+      for (let i = start; i <= end; i++) {
+        titles.push(`${base} ${i}`);
+      }
+      return titles;
+    }
+  }
+  return [title];
+}
+
 export default function Home() {
   const [mode, setMode] = useState<Mode>("file");
 
@@ -42,9 +61,12 @@ export default function Home() {
   const [parsedRows, setParsedRows] = useState<BookRow[]>([]);
   const [processing, setProcessing] = useState(false);
   const [progress, setProgress] = useState(0);
+  const [totalItems, setTotalItems] = useState(0);
   const [message, setMessage] = useState("");
   const [results, setResults] = useState<ResultRow[]>([]);
   const [isDragging, setIsDragging] = useState(false);
+  const [previewPage, setPreviewPage] = useState(0);
+  const PREVIEW_PER_PAGE = 10;
 
   // 수동 입력 모드용 상태
   const [manualBooks, setManualBooks] = useState<ManualBook[]>([]);
@@ -86,6 +108,7 @@ export default function Home() {
 
         setFile(selectedFile);
         setParsedRows(parsed);
+        setPreviewPage(0);
         setResults([]);
         setProgress(0);
         setMessage("");
@@ -121,12 +144,23 @@ export default function Home() {
     setProgress(0);
     setMessage("처리 시작...");
 
+    // 권수 범위 확장 (예: ".1-2" → 1권, 2권 각각)
+    const expandedRows: BookRow[] = [];
+    for (const row of parsedRows) {
+      const titles = expandVolumeRange(row.도서명);
+      for (const title of titles) {
+        expandedRows.push({ ...row, 도서명: title });
+      }
+    }
+
+    const total = expandedRows.length;
+    setTotalItems(total);
     const newResults: ResultRow[] = [];
 
-    for (let i = 0; i < parsedRows.length; i++) {
-      const row = parsedRows[i];
+    for (let i = 0; i < total; i++) {
+      const row = expandedRows[i];
       setProgress(i);
-      setMessage(`처리 중: ${i + 1}/${parsedRows.length} - ${row.도서명.slice(0, 20)}...`);
+      setMessage(`처리 중: ${i + 1}/${total} - ${row.도서명.slice(0, 20)}...`);
 
       let isbn = "";
       let candidateCount = 0;
@@ -152,6 +186,7 @@ export default function Home() {
       }
 
       // 2. Read365 검색
+      let read365Info = "";
       if (isbn) {
         try {
           const res = await fetch("/api/search/book", {
@@ -165,9 +200,20 @@ export default function Home() {
             existsMark = data.exists ? "✅" : "❌";
             matchedSchool = data.matched_school || row.학교명;
 
-            if (data.exists && schools.length > 1) {
-              reason = `동명 학교 ${schools.length}개 매칭: ${schools.join(", ")}`;
-            } else if (!data.exists) {
+            if (data.exists) {
+              // 독서로 검색 위치 정보
+              const region = data.matched_region || "";
+              const page = data.matched_page || "";
+              if (region && page) {
+                read365Info = `${region} ${page}페이지`;
+              } else if (region) {
+                read365Info = region;
+              }
+
+              if (schools.length > 1) {
+                reason = `동명 학교 ${schools.length}개 매칭: ${schools.join(", ")}`;
+              }
+            } else {
               if (data.total_count === 0) {
                 reason = "주요 지역에 등록된 도서 없음";
               } else {
@@ -191,6 +237,7 @@ export default function Home() {
         ISBN13: isbn,
         검색학교: matchedSchool || row.학교명,
         존재여부: existsMark,
+        독서로: read365Info,
         사유: reason,
       });
 
@@ -198,8 +245,8 @@ export default function Home() {
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
 
-    setProgress(parsedRows.length);
-    setMessage(`완료! ${parsedRows.length}권 처리됨`);
+    setProgress(total);
+    setMessage(`완료! ${total}권 처리됨${total !== parsedRows.length ? ` (원본 ${parsedRows.length}행, 권수 확장 ${total}권)` : ""}`);
     setProcessing(false);
   };
 
@@ -208,11 +255,11 @@ export default function Home() {
     if (results.length === 0) return;
 
     const ws = XLSX.utils.json_to_sheet(results, {
-      header: ["학교명", "도서명", "저자", "출판사", "ISBN13", "검색학교", "존재여부", "사유"],
+      header: ["학교명", "도서명", "저자", "출판사", "ISBN13", "검색학교", "존재여부", "독서로", "사유"],
     });
     ws["!cols"] = [
       { wch: 15 }, { wch: 30 }, { wch: 15 }, { wch: 15 },
-      { wch: 16 }, { wch: 15 }, { wch: 10 }, { wch: 40 },
+      { wch: 16 }, { wch: 15 }, { wch: 10 }, { wch: 18 }, { wch: 40 },
     ];
 
     const wb = XLSX.utils.book_new();
@@ -226,26 +273,28 @@ export default function Home() {
     setParsedRows([]);
     setResults([]);
     setProgress(0);
+    setTotalItems(0);
     setMessage("");
   };
 
-  // 수동 입력: 도서 추가
+  // 수동 입력: 도서 추가 (권수 범위 자동 확장)
   const addManualBook = () => {
     if (!newBook.school || !newBook.title) {
       alert("학교명과 도서명은 필수입니다");
       return;
     }
 
-    const book: ManualBook = {
-      id: Date.now().toString(),
+    const titles = expandVolumeRange(newBook.title);
+    const newBooks: ManualBook[] = titles.map((title, idx) => ({
+      id: `${Date.now()}-${idx}`,
       school: newBook.school,
-      title: newBook.title,
+      title,
       author: newBook.author,
       publisher: newBook.publisher,
-      status: "pending",
-    };
+      status: "pending" as const,
+    }));
 
-    setManualBooks((prev) => [...prev, book]);
+    setManualBooks((prev) => [...prev, ...newBooks]);
     setNewBook({ school: "", title: "", author: "", publisher: "" });
   };
 
@@ -456,7 +505,9 @@ export default function Home() {
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-100">
-                        {parsedRows.slice(0, 5).map((row, i) => (
+                        {parsedRows
+                          .slice(previewPage * PREVIEW_PER_PAGE, (previewPage + 1) * PREVIEW_PER_PAGE)
+                          .map((row, i) => (
                           <tr key={i} className="bg-white hover:bg-slate-50 transition-colors">
                             <td className="px-4 py-3 font-medium text-slate-700">{row.학교명}</td>
                             <td className="px-4 py-3 text-slate-600">{row.도서명}</td>
@@ -466,10 +517,28 @@ export default function Home() {
                         ))}
                       </tbody>
                     </table>
-                    {parsedRows.length > 5 && (
-                      <p className="text-slate-400 text-xs mt-2 px-4">
-                        ... 외 {parsedRows.length - 5}권
-                      </p>
+                    {parsedRows.length > PREVIEW_PER_PAGE && (
+                      <div className="flex items-center justify-between px-4 py-3 border-t border-slate-100">
+                        <span className="text-xs text-slate-400">
+                          {previewPage * PREVIEW_PER_PAGE + 1}-{Math.min((previewPage + 1) * PREVIEW_PER_PAGE, parsedRows.length)} / {parsedRows.length}권
+                        </span>
+                        <div className="flex gap-2">
+                          <button
+                            onClick={() => setPreviewPage((p) => Math.max(0, p - 1))}
+                            disabled={previewPage === 0}
+                            className="px-3 py-1 text-xs font-medium rounded-lg border border-slate-200 text-slate-500 hover:bg-slate-50 disabled:opacity-30 disabled:cursor-not-allowed"
+                          >
+                            이전
+                          </button>
+                          <button
+                            onClick={() => setPreviewPage((p) => Math.min(Math.ceil(parsedRows.length / PREVIEW_PER_PAGE) - 1, p + 1))}
+                            disabled={previewPage >= Math.ceil(parsedRows.length / PREVIEW_PER_PAGE) - 1}
+                            className="px-3 py-1 text-xs font-medium rounded-lg border border-slate-200 text-slate-500 hover:bg-slate-50 disabled:opacity-30 disabled:cursor-not-allowed"
+                          >
+                            다음
+                          </button>
+                        </div>
+                      </div>
                     )}
                   </div>
                 </div>
@@ -502,19 +571,19 @@ export default function Home() {
 
                 <p className="text-slate-600 text-sm mb-4">{message}</p>
 
-                {parsedRows.length > 0 && (
+                {totalItems > 0 && (
                   <div className="mb-4">
                     <div className="flex justify-between text-xs text-slate-500 mb-2">
                       <span className="font-bold uppercase tracking-wider">진행률</span>
                       <span className="font-medium">
-                        {progress} / {parsedRows.length} (
-                        {Math.round((progress / parsedRows.length) * 100)}%)
+                        {progress} / {totalItems} (
+                        {Math.round((progress / totalItems) * 100)}%)
                       </span>
                     </div>
                     <div className="w-full bg-slate-100 rounded-full h-2">
                       <div
                         className="bg-blue-600 h-2 rounded-full transition-all duration-300"
-                        style={{ width: `${(progress / parsedRows.length) * 100}%` }}
+                        style={{ width: `${(progress / totalItems) * 100}%` }}
                       />
                     </div>
                   </div>

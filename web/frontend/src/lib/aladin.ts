@@ -11,6 +11,10 @@ const ALADIN_BASE_URL = 'https://www.aladin.co.kr/ttb/api/ItemSearch.aspx';
  */
 function normalizeTitle(title: string): string {
   return title
+    // 끝부분 권수 범위 표기 제거: .1-2, .1~3, 1-2 등
+    .replace(/\s*[.]\s*\d+\s*[-~]\s*\d+\s*$/, '')
+    // 끝부분 단일 권수 표기 제거: .1, .2 등
+    .replace(/\s*[.]\s*\d+\s*$/, '')
     // 괄호와 내용 제거: (2학년), [특별판] 등
     .replace(/[(\[][^)\]]*[)\]]/g, ' ')
     // 특수문자를 공백으로: . : - _ 등

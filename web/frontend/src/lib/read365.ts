@@ -69,6 +69,8 @@ interface Read365Book {
   schoolName?: string;
   provName?: string;
   isbn?: string;
+  _page?: number;
+  _provCode?: string;
 }
 
 interface Read365SearchResult {
@@ -166,6 +168,12 @@ export async function searchISBNAllPages(
       break;
     }
 
+    // 각 도서에 페이지 번호와 지역 코드 기록
+    for (const book of result.books) {
+      book._page = page;
+      book._provCode = provCode || undefined;
+    }
+
     allBooks.push(...result.books);
 
     if (page >= result.totalPages) {
@@ -223,10 +231,24 @@ export async function searchISBNMultiRegion(
   return { totalCount, books: allBooks };
 }
 
+// 지역 코드 → 지역명 역매핑
+const PROV_CODE_TO_NAME: Record<string, string> = {
+  'B10': '서울', 'C10': '부산', 'D10': '대구', 'E10': '인천',
+  'F10': '광주', 'G10': '대전', 'H10': '울산', 'I10': '세종',
+  'J10': '경기', 'K10': '강원', 'M10': '충북', 'N10': '충남',
+  'P10': '전북', 'Q10': '전남', 'R10': '경북', 'S10': '경남', 'T10': '제주',
+};
+
 export function findSchoolBooks(
   books: Read365Book[],
   schoolName: string
-): { found: Read365Book[]; matchedSchool: string | null; matchedSchools: string[] } {
+): {
+  found: Read365Book[];
+  matchedSchool: string | null;
+  matchedSchools: string[];
+  matchedRegion: string | null;
+  matchedPage: number | null;
+} {
   const normalizedSchool = schoolName.replace(/\s/g, '').toLowerCase();
   const found: Read365Book[] = [];
   const matchedSchoolSet = new Set<string>();
@@ -244,5 +266,11 @@ export function findSchoolBooks(
   }
 
   const matchedSchools = [...matchedSchoolSet];
-  return { found, matchedSchool: matchedSchools[0] || null, matchedSchools };
+  const firstMatch = found[0];
+  const matchedRegion = firstMatch?._provCode
+    ? PROV_CODE_TO_NAME[firstMatch._provCode] || firstMatch.provName || null
+    : firstMatch?.provName || null;
+  const matchedPage = firstMatch?._page || null;
+
+  return { found, matchedSchool: matchedSchools[0] || null, matchedSchools, matchedRegion, matchedPage };
 }
