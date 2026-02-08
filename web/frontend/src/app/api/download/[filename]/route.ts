@@ -29,8 +29,7 @@ export async function GET(
   // 엑셀 파일 생성
   const excelBuffer = createResultExcel(job.results);
 
-  // 응답 반환 (Uint8Array를 Response에서 사용 가능한 형태로 변환)
-  return new NextResponse(excelBuffer.buffer as ArrayBuffer, {
+  return new NextResponse(Buffer.from(excelBuffer), {
     headers: {
       'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       'Content-Disposition': `attachment; filename="${filename}.xlsx"`,
