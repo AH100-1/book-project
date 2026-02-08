@@ -1,26 +1,24 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState } from "react";
+import * as XLSX from "xlsx";
 
-// Next.js API Routes 사용 (상대 경로)
-const API_URL = "";
-
-interface FilePreview {
-  file_id: string;
-  filename: string;
-  total_rows: number;
-  preview: Record<string, string>[];
+interface BookRow {
+  학교명: string;
+  도서명: string;
+  저자: string;
+  출판사: string;
 }
 
-interface Job {
-  job_id: string;
-  status: "pending" | "running" | "completed" | "failed";
-  progress: number;
-  total: number;
-  message: string;
-  result_file: string | null;
-  created_at: string;
-  updated_at: string;
+interface ResultRow {
+  학교명: string;
+  도서명: string;
+  저자: string;
+  출판사: string;
+  ISBN13: string;
+  검색학교: string;
+  존재여부: string;
+  사유: string;
 }
 
 interface ManualBook {
@@ -39,12 +37,14 @@ type Mode = "file" | "manual";
 export default function Home() {
   const [mode, setMode] = useState<Mode>("file");
 
+  // 파일 모드 상태
   const [file, setFile] = useState<File | null>(null);
-  const [filePreview, setFilePreview] = useState<FilePreview | null>(null);
-  const [uploading, setUploading] = useState(false);
-
-  const [currentJob, setCurrentJob] = useState<Job | null>(null);
-  const [polling, setPolling] = useState(false);
+  const [parsedRows, setParsedRows] = useState<BookRow[]>([]);
+  const [processing, setProcessing] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [message, setMessage] = useState("");
+  const [results, setResults] = useState<ResultRow[]>([]);
+  const [isDragging, setIsDragging] = useState(false);
 
   // 수동 입력 모드용 상태
   const [manualBooks, setManualBooks] = useState<ManualBook[]>([]);
@@ -56,108 +56,177 @@ export default function Home() {
   });
   const [isSearching, setIsSearching] = useState(false);
 
-  // 작업 상태 폴링
-  useEffect(() => {
-    if (!currentJob || !polling) return;
-    if (currentJob.status === "completed" || currentJob.status === "failed") {
-      setPolling(false);
-      return;
-    }
-
-    const interval = setInterval(async () => {
+  // 엑셀 파일 클라이언트에서 파싱
+  const parseExcelFile = (selectedFile: File) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
       try {
-        const res = await fetch(`${API_URL}/api/jobs/${currentJob.job_id}`);
-        const job = await res.json();
-        setCurrentJob(job);
-        if (job.status === "completed" || job.status === "failed") {
-          setPolling(false);
+        const data = new Uint8Array(e.target!.result as ArrayBuffer);
+        const wb = XLSX.read(data, { type: "array" });
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        const rows = XLSX.utils.sheet_to_json<Record<string, string>>(ws);
+
+        if (rows.length === 0) {
+          alert("파일에 데이터가 없습니다");
+          return;
         }
-      } catch (e) {
-        console.error(e);
+
+        const first = rows[0];
+        if (!("학교명" in first) || !("도서명" in first)) {
+          alert("필수 열이 없습니다: 학교명, 도서명, 저자, 출판사");
+          return;
+        }
+
+        const parsed: BookRow[] = rows.map((r) => ({
+          학교명: r["학교명"] || "",
+          도서명: r["도서명"] || "",
+          저자: r["저자"] || "",
+          출판사: r["출판사"] || "",
+        }));
+
+        setFile(selectedFile);
+        setParsedRows(parsed);
+        setResults([]);
+        setProgress(0);
+        setMessage("");
+      } catch {
+        alert("엑셀 파일 파싱에 실패했습니다");
       }
-    }, 1000);
-
-    return () => clearInterval(interval);
-  }, [currentJob, polling]);
-
-  // 파일 업로드 공통 로직
-  const uploadFile = async (selectedFile: File) => {
-    setFile(selectedFile);
-    setUploading(true);
-    setFilePreview(null);
-
-    const formData = new FormData();
-    formData.append("file", selectedFile);
-
-    try {
-      const res = await fetch(`${API_URL}/api/upload`, {
-        method: "POST",
-        body: formData,
-      });
-      if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.detail || "업로드 실패");
-      }
-      const data = await res.json();
-      setFilePreview(data);
-    } catch (e: unknown) {
-      const message = e instanceof Error ? e.message : "파일 업로드 실패";
-      alert(message);
-      setFile(null);
-    } finally {
-      setUploading(false);
-    }
+    };
+    reader.readAsArrayBuffer(selectedFile);
   };
 
-  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFile = e.target.files?.[0];
-    if (!selectedFile) return;
-    uploadFile(selectedFile);
+    if (selectedFile) parseExcelFile(selectedFile);
   };
-
-  const [isDragging, setIsDragging] = useState(false);
 
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setIsDragging(false);
     const droppedFile = e.dataTransfer.files[0];
     if (droppedFile && /\.xlsx?$/.test(droppedFile.name)) {
-      uploadFile(droppedFile);
+      parseExcelFile(droppedFile);
     } else {
       alert(".xlsx 또는 .xls 파일만 업로드 가능합니다");
     }
   };
 
-  // 검증 시작 (파일 모드)
+  // 검증 시작 - 클라이언트에서 직접 한 권씩 처리
   const startVerification = async () => {
-    if (!filePreview) return;
+    if (parsedRows.length === 0) return;
 
-    try {
-      const res = await fetch(`${API_URL}/api/verify/${filePreview.file_id}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({}),
-      });
-      if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.detail || "시작 실패");
+    setProcessing(true);
+    setResults([]);
+    setProgress(0);
+    setMessage("처리 시작...");
+
+    const newResults: ResultRow[] = [];
+
+    for (let i = 0; i < parsedRows.length; i++) {
+      const row = parsedRows[i];
+      setProgress(i);
+      setMessage(`처리 중: ${i + 1}/${parsedRows.length} - ${row.도서명.slice(0, 20)}...`);
+
+      let isbn = "";
+      let candidateCount = 0;
+      let reason = "";
+      let existsMark = "❌";
+      let matchedSchool = "";
+
+      // 1. 알라딘 API로 ISBN 검색
+      try {
+        const res = await fetch("/api/search/aladin", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ title: row.도서명, author: row.저자 }),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          isbn = data.isbn13 || "";
+          candidateCount = data.candidate_count || 0;
+          if (!isbn) reason = `알라딘 ISBN 미확인: ${data.error || "알 수 없음"}`;
+        }
+      } catch (e) {
+        reason = `알라딘 오류: ${e}`;
       }
-      const data = await res.json();
 
-      const jobRes = await fetch(`${API_URL}/api/jobs/${data.job_id}`);
-      const job = await jobRes.json();
-      setCurrentJob(job);
-      setPolling(true);
-    } catch (e: unknown) {
-      const message = e instanceof Error ? e.message : "검증 시작 실패";
-      alert(message);
+      // 2. Read365 검색
+      if (isbn) {
+        try {
+          const res = await fetch("/api/search/book", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ isbn, school: row.학교명 }),
+          });
+          if (res.ok) {
+            const data = await res.json();
+            const schools: string[] = data.matched_schools || [];
+            existsMark = data.exists ? "✅" : "❌";
+            matchedSchool = data.matched_school || row.학교명;
+
+            if (data.exists && schools.length > 1) {
+              reason = `동명 학교 ${schools.length}개 매칭: ${schools.join(", ")}`;
+            } else if (!data.exists) {
+              if (data.total_count === 0) {
+                reason = "주요 지역에 등록된 도서 없음";
+              } else {
+                reason = `${row.학교명}에 없음 (타 학교 ${data.total_count}권 보유)`;
+                if (candidateCount > 1) {
+                  reason += ` - 동일 제목 ${candidateCount}개 버전 존재, 도서명을 더 정확히 입력하세요`;
+                }
+              }
+            }
+          }
+        } catch (e) {
+          reason = `Read365 검색 오류: ${e}`;
+        }
+      }
+
+      newResults.push({
+        학교명: row.학교명,
+        도서명: row.도서명,
+        저자: row.저자,
+        출판사: row.출판사,
+        ISBN13: isbn,
+        검색학교: matchedSchool || row.학교명,
+        존재여부: existsMark,
+        사유: reason,
+      });
+
+      setResults([...newResults]);
+      await new Promise((resolve) => setTimeout(resolve, 100));
     }
+
+    setProgress(parsedRows.length);
+    setMessage(`완료! ${parsedRows.length}권 처리됨`);
+    setProcessing(false);
   };
 
-  // 결과 다운로드
+  // 결과 엑셀 다운로드
   const downloadResult = () => {
-    if (!currentJob?.result_file) return;
-    window.open(`${API_URL}/api/download/${currentJob.result_file}`, "_blank");
+    if (results.length === 0) return;
+
+    const ws = XLSX.utils.json_to_sheet(results, {
+      header: ["학교명", "도서명", "저자", "출판사", "ISBN13", "검색학교", "존재여부", "사유"],
+    });
+    ws["!cols"] = [
+      { wch: 15 }, { wch: 30 }, { wch: 15 }, { wch: 15 },
+      { wch: 16 }, { wch: 15 }, { wch: 10 }, { wch: 40 },
+    ];
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "검증결과");
+    XLSX.writeFile(wb, `검증결과_${new Date().toISOString().slice(0, 10)}.xlsx`);
+  };
+
+  // 새 작업 시작
+  const resetFileMode = () => {
+    setFile(null);
+    setParsedRows([]);
+    setResults([]);
+    setProgress(0);
+    setMessage("");
   };
 
   // 수동 입력: 도서 추가
@@ -197,20 +266,15 @@ export default function Home() {
     for (let i = 0; i < manualBooks.length; i++) {
       const book = manualBooks[i];
 
-      // 상태 업데이트: 검색 중
       setManualBooks((prev) =>
         prev.map((b) => (b.id === book.id ? { ...b, status: "searching" } : b))
       );
 
       try {
-        // 1. 알라딘 API로 ISBN 검색
-        const isbnRes = await fetch(`${API_URL}/api/search/aladin`, {
+        const isbnRes = await fetch("/api/search/aladin", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            title: book.title,
-            author: book.author,
-          }),
+          body: JSON.stringify({ title: book.title, author: book.author }),
         });
 
         let isbn = "";
@@ -232,14 +296,10 @@ export default function Home() {
           continue;
         }
 
-        // 2. Read365 API로 검색
-        const searchRes = await fetch(`${API_URL}/api/search/book`, {
+        const searchRes = await fetch("/api/search/book", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            isbn,
-            school: book.school,
-          }),
+          body: JSON.stringify({ isbn, school: book.school }),
         });
 
         if (searchRes.ok) {
@@ -270,7 +330,7 @@ export default function Home() {
         } else {
           throw new Error("검색 실패");
         }
-      } catch (e) {
+      } catch {
         setManualBooks((prev) =>
           prev.map((b) =>
             b.id === book.id
@@ -280,31 +340,10 @@ export default function Home() {
         );
       }
 
-      // 잠시 대기 (API 부하 방지)
       await new Promise((resolve) => setTimeout(resolve, 500));
     }
 
     setIsSearching(false);
-  };
-
-  const getStatusBadge = (status: string) => {
-    const styles: Record<string, string> = {
-      completed: "bg-green-100 text-green-700",
-      failed: "bg-red-100 text-red-700",
-      running: "bg-blue-100 text-blue-700",
-      pending: "bg-slate-100 text-slate-600",
-    };
-    const labels: Record<string, string> = {
-      completed: "완료",
-      failed: "실패",
-      running: "진행 중",
-      pending: "대기 중",
-    };
-    return (
-      <span className={`px-2 py-1 rounded text-xs font-bold ${styles[status] || styles.pending}`}>
-        {labels[status] || status}
-      </span>
-    );
   };
 
   const getBookStatusBadge = (status: ManualBook["status"]) => {
@@ -319,6 +358,8 @@ export default function Home() {
     return <span className={`px-2 py-1 ${bg} ${textColor} rounded text-xs font-bold`}>{text}</span>;
   };
 
+  const isCompleted = results.length > 0 && !processing;
+
   return (
     <main className="min-h-screen bg-bg-light p-8">
       <div className="max-w-5xl mx-auto fade-in">
@@ -329,9 +370,6 @@ export default function Home() {
               <h1 className="text-2xl font-bold text-slate-900 flex items-center gap-2">
                 <span className="text-blue-600"></span> 독서로 ISBN 검증 시스템
               </h1>
-              <span className="bg-blue-100 text-blue-700 text-xs px-2 py-1 rounded font-bold">
-                API 모드
-              </span>
             </div>
             <p className="text-slate-500 text-sm">
               학교 도서관 구매 도서의 Read365 존재 여부를 자동으로 검증합니다
@@ -385,11 +423,7 @@ export default function Home() {
                 }`}
               >
                 <div className="flex flex-col items-center justify-center pt-5 pb-6">
-                  {uploading ? (
-                    <div className="w-10 h-10 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mb-2" />
-                  ) : (
-                    <span className="material-icons-outlined text-4xl text-slate-400 mb-2">cloud_upload</span>
-                  )}
+                  <span className="material-icons-outlined text-4xl text-slate-400 mb-2">cloud_upload</span>
                   <p className="text-sm text-slate-500 font-medium">
                     {file ? file.name : "파일을 드래그하거나 클릭하여 선택하세요 (.xlsx)"}
                   </p>
@@ -399,15 +433,15 @@ export default function Home() {
                   className="hidden"
                   accept=".xlsx,.xls"
                   onChange={handleFileChange}
-                  disabled={uploading}
+                  disabled={processing}
                 />
               </label>
 
-              {filePreview && (
+              {parsedRows.length > 0 && !processing && results.length === 0 && (
                 <div className="mt-4">
                   <div className="flex items-center gap-2 mb-3">
                     <span className="bg-blue-100 text-blue-700 text-xs px-2 py-1 rounded font-bold">
-                      {filePreview.total_rows}권
+                      {parsedRows.length}권
                     </span>
                     <span className="text-slate-600 text-sm font-medium">의 도서가 포함되어 있습니다</span>
                   </div>
@@ -422,19 +456,19 @@ export default function Home() {
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-100">
-                        {filePreview.preview.map((row, i) => (
+                        {parsedRows.slice(0, 5).map((row, i) => (
                           <tr key={i} className="bg-white hover:bg-slate-50 transition-colors">
-                            <td className="px-4 py-3 font-medium text-slate-700">{row["학교명"]}</td>
-                            <td className="px-4 py-3 text-slate-600">{row["도서명"]}</td>
-                            <td className="px-4 py-3 text-slate-500">{row["저자"]}</td>
-                            <td className="px-4 py-3 text-slate-500">{row["출판사"]}</td>
+                            <td className="px-4 py-3 font-medium text-slate-700">{row.학교명}</td>
+                            <td className="px-4 py-3 text-slate-600">{row.도서명}</td>
+                            <td className="px-4 py-3 text-slate-500">{row.저자}</td>
+                            <td className="px-4 py-3 text-slate-500">{row.출판사}</td>
                           </tr>
                         ))}
                       </tbody>
                     </table>
-                    {filePreview.total_rows > 5 && (
+                    {parsedRows.length > 5 && (
                       <p className="text-slate-400 text-xs mt-2 px-4">
-                        ... 외 {filePreview.total_rows - 5}권
+                        ... 외 {parsedRows.length - 5}권
                       </p>
                     )}
                   </div>
@@ -442,7 +476,7 @@ export default function Home() {
               )}
             </div>
 
-            {filePreview && !currentJob && (
+            {parsedRows.length > 0 && !processing && results.length === 0 && (
               <button
                 onClick={startVerification}
                 className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-6 rounded-xl shadow-sm hover:shadow-md transition-all flex items-center justify-center gap-2"
@@ -452,59 +486,56 @@ export default function Home() {
               </button>
             )}
 
-            {currentJob && (
+            {(processing || isCompleted) && (
               <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 mt-6">
                 <div className="flex items-center justify-between mb-4">
                   <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2">
-                    <span className="w-1 h-5 bg-green-500 rounded-full"></span>
+                    <span className={`w-1 h-5 rounded-full ${isCompleted ? "bg-green-500" : "bg-blue-500"}`}></span>
                     작업 상태
                   </h3>
-                  {getStatusBadge(currentJob.status)}
+                  <span className={`px-2 py-1 rounded text-xs font-bold ${
+                    isCompleted ? "bg-green-100 text-green-700" : "bg-blue-100 text-blue-700"
+                  }`}>
+                    {isCompleted ? "완료" : "진행 중"}
+                  </span>
                 </div>
 
-                <p className="text-slate-600 text-sm mb-4">{currentJob.message}</p>
+                <p className="text-slate-600 text-sm mb-4">{message}</p>
 
-                {currentJob.total > 0 && (
+                {parsedRows.length > 0 && (
                   <div className="mb-4">
                     <div className="flex justify-between text-xs text-slate-500 mb-2">
                       <span className="font-bold uppercase tracking-wider">진행률</span>
                       <span className="font-medium">
-                        {currentJob.progress} / {currentJob.total} (
-                        {Math.round((currentJob.progress / currentJob.total) * 100)}%)
+                        {progress} / {parsedRows.length} (
+                        {Math.round((progress / parsedRows.length) * 100)}%)
                       </span>
                     </div>
                     <div className="w-full bg-slate-100 rounded-full h-2">
                       <div
                         className="bg-blue-600 h-2 rounded-full transition-all duration-300"
-                        style={{
-                          width: `${(currentJob.progress / currentJob.total) * 100}%`,
-                        }}
+                        style={{ width: `${(progress / parsedRows.length) * 100}%` }}
                       />
                     </div>
                   </div>
                 )}
 
-                {currentJob.status === "completed" && currentJob.result_file && (
-                  <button
-                    onClick={downloadResult}
-                    className="w-full bg-green-600 hover:bg-green-700 text-white font-semibold py-3 px-6 rounded-xl shadow-sm hover:shadow-md transition-all flex items-center justify-center gap-2"
-                  >
-                    <span className="material-icons-outlined text-sm">download</span>
-                    결과 다운로드
-                  </button>
-                )}
-
-                {(currentJob.status === "completed" || currentJob.status === "failed") && (
-                  <button
-                    onClick={() => {
-                      setCurrentJob(null);
-                      setFilePreview(null);
-                      setFile(null);
-                    }}
-                    className="w-full mt-3 bg-slate-100 hover:bg-slate-200 text-slate-600 font-semibold py-3 px-6 rounded-xl transition-colors"
-                  >
-                    새 작업 시작
-                  </button>
+                {isCompleted && (
+                  <>
+                    <button
+                      onClick={downloadResult}
+                      className="w-full bg-green-600 hover:bg-green-700 text-white font-semibold py-3 px-6 rounded-xl shadow-sm hover:shadow-md transition-all flex items-center justify-center gap-2"
+                    >
+                      <span className="material-icons-outlined text-sm">download</span>
+                      결과 다운로드
+                    </button>
+                    <button
+                      onClick={resetFileMode}
+                      className="w-full mt-3 bg-slate-100 hover:bg-slate-200 text-slate-600 font-semibold py-3 px-6 rounded-xl transition-colors"
+                    >
+                      새 작업 시작
+                    </button>
+                  </>
                 )}
               </div>
             )}
@@ -514,7 +545,6 @@ export default function Home() {
         {/* ========== 수동 입력 모드 ========== */}
         {mode === "manual" && (
           <>
-            {/* 입력 폼 */}
             <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 mb-6">
               <h3 className="text-lg font-bold text-slate-800 mb-4 flex items-center gap-2">
                 <span className="w-1 h-5 bg-indigo-500 rounded-full"></span>
@@ -579,7 +609,6 @@ export default function Home() {
               </button>
             </div>
 
-            {/* 도서 목록 */}
             {manualBooks.length > 0 && (
               <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden mb-6">
                 <div className="px-6 py-4 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">

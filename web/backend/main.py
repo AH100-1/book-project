@@ -251,22 +251,27 @@ async def search_book(request: BookSearchRequest):
         total_items = 0
 
         search_regions = [prov_code] if prov_code else []
-        search_regions.extend([r for r in MAJOR_REGION_CODES if r not in search_regions][:6])
+        search_regions.extend([r for r in MAJOR_REGION_CODES if r not in search_regions])
 
-        for region_code in search_regions:
-            try:
-                books = await asyncio.get_event_loop().run_in_executor(
-                    executor,
-                    lambda rc=region_code: api_client.search_isbn_all_pages(
-                        isbn=request.isbn,
-                        prov_code=rc,
-                    )
+        # 모든 지역 병렬 검색
+        tasks = [
+            asyncio.get_event_loop().run_in_executor(
+                executor,
+                lambda rc=region_code: api_client.search_isbn_all_pages(
+                    isbn=request.isbn,
+                    prov_code=rc,
                 )
-                total_items += len(books)
-                all_books.extend(books)
-            except Exception as e:
-                logger.warning(f"지역 {region_code} 검색 실패: {e}")
+            )
+            for region_code in search_regions
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        for result in results:
+            if isinstance(result, Exception):
+                logger.warning(f"지역 검색 실패: {result}")
                 continue
+            total_items += len(result)
+            all_books.extend(result)
 
         api_client.close()
 
