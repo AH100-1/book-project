@@ -36,9 +36,9 @@ export async function searchISBNByTitleAuthor(
   title: string,
   author: string = '',
   threshold: number = 0.6
-): Promise<{ isbn13: string | null; error: string | null }> {
+): Promise<{ isbn13: string | null; error: string | null; candidateCount: number }> {
   if (!title) {
-    return { isbn13: null, error: '빈 제목' };
+    return { isbn13: null, error: '빈 제목', candidateCount: 0 };
   }
 
   // 검색용 제목 정규화 (괄호, 특수문자 제거)
@@ -70,7 +70,7 @@ export async function searchISBNByTitleAuthor(
     const items = data.item || [];
 
     if (items.length === 0) {
-      return { isbn13: null, error: '검색 결과 없음' };
+      return { isbn13: null, error: '검색 결과 없음', candidateCount: 0 };
     }
 
     // 유사도 계산하여 최적 매칭 찾기
@@ -102,12 +102,12 @@ export async function searchISBNByTitleAuthor(
     if (best && bestScore >= threshold) {
       const isbn13 = (best.isbn13 || '').trim();
       if (isbn13) {
-        return { isbn13, error: null };
+        return { isbn13, error: null, candidateCount: items.length };
       }
-      return { isbn13: null, error: 'isbn 비어있음' };
+      return { isbn13: null, error: 'isbn 비어있음', candidateCount: items.length };
     }
 
-    return { isbn13: null, error: `유사도 미달(${bestScore.toFixed(2)})` };
+    return { isbn13: null, error: `유사도 미달(${bestScore.toFixed(2)})`, candidateCount: items.length };
   } catch (error) {
     console.error('알라딘 API 오류:', error);
     throw error;

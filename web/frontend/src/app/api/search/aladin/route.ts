@@ -28,6 +28,7 @@ export async function POST(request: NextRequest) {
       author: author || '',
       isbn13: result.isbn13,
       error: result.error,
+      candidate_count: result.candidateCount,
     });
   } catch (error) {
     console.error('알라딘 검색 오류:', error);

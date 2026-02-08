@@ -198,9 +198,11 @@ export default function Home() {
         });
 
         let isbn = "";
+        let candidateCount = 0;
         if (isbnRes.ok) {
           const isbnData = await isbnRes.json();
           isbn = isbnData.isbn13 || "";
+          candidateCount = isbnData.candidate_count || 0;
         }
 
         if (!isbn) {
@@ -231,6 +233,10 @@ export default function Home() {
             schools.length > 1
               ? ` (${schools.join(", ")} 등 ${schools.length}개 학교 동시 매칭 - 학교명을 더 정확히 입력하세요)`
               : "";
+          const multiVersionWarning =
+            !searchData.exists && candidateCount > 1
+              ? ` - 동일 제목 ${candidateCount}개 버전 존재, 도서명을 더 정확히 입력하세요`
+              : "";
           setManualBooks((prev) =>
             prev.map((b) =>
               b.id === book.id
@@ -240,7 +246,7 @@ export default function Home() {
                     status: searchData.exists ? "found" : "not_found",
                     result: searchData.exists
                       ? `✅ ${searchData.matched_school || book.school}에서 발견${multiSchoolWarning}`
-                      : `❌ ${book.school}에 없음 (${searchData.total_count || 0}권 타학교 보유)`,
+                      : `❌ ${book.school}에 없음 (${searchData.total_count || 0}권 타학교 보유)${multiVersionWarning}`,
                   }
                 : b
             )

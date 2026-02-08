@@ -90,6 +90,7 @@ async function processVerification(jobId: string, ttbKey: string) {
     const { 학교명: school, 도서명: title, 저자: author, 출판사: publisher } = row;
 
     let isbn13: string | null = null;
+    let candidateCount = 0;
     let reason = '';
     let existsMark = '❌';
     let matchedSchool: string | null = null;
@@ -106,6 +107,7 @@ async function processVerification(jobId: string, ttbKey: string) {
       try {
         const result = await searchISBNByTitleAuthor(ttbKey, title, author, 0.6);
         isbn13 = result.isbn13;
+        candidateCount = result.candidateCount;
         cache.setISBN(title, author, isbn13, result.error);
         if (!isbn13) {
           reason = `알라딘 ISBN 미확인: ${result.error || '알 수 없음'}`;
@@ -143,6 +145,9 @@ async function processVerification(jobId: string, ttbKey: string) {
               reason = '주요 지역에 등록된 도서 없음';
             } else {
               reason = `${school}에 없음 (타 학교 ${totalCount}권 보유)`;
+              if (candidateCount > 1) {
+                reason += ` - 동일 제목 ${candidateCount}개 버전 존재, 도서명을 더 정확히 입력하세요`;
+              }
             }
           }
         } catch (err) {
