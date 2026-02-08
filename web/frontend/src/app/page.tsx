@@ -80,11 +80,8 @@ export default function Home() {
     return () => clearInterval(interval);
   }, [currentJob, polling]);
 
-  // 파일 업로드
-  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const selectedFile = e.target.files?.[0];
-    if (!selectedFile) return;
-
+  // 파일 업로드 공통 로직
+  const uploadFile = async (selectedFile: File) => {
     setFile(selectedFile);
     setUploading(true);
     setFilePreview(null);
@@ -109,6 +106,25 @@ export default function Home() {
       setFile(null);
     } finally {
       setUploading(false);
+    }
+  };
+
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const selectedFile = e.target.files?.[0];
+    if (!selectedFile) return;
+    uploadFile(selectedFile);
+  };
+
+  const [isDragging, setIsDragging] = useState(false);
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(false);
+    const droppedFile = e.dataTransfer.files[0];
+    if (droppedFile && /\.xlsx?$/.test(droppedFile.name)) {
+      uploadFile(droppedFile);
+    } else {
+      alert(".xlsx 또는 .xls 파일만 업로드 가능합니다");
     }
   };
 
@@ -358,7 +374,16 @@ export default function Home() {
                 파일 업로드
               </h3>
 
-              <label className="flex flex-col items-center justify-center w-full h-32 border-2 border-dashed border-slate-300 rounded-xl cursor-pointer hover:bg-slate-50 hover:border-blue-400 transition-all">
+              <label
+                onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
+                onDragLeave={() => setIsDragging(false)}
+                onDrop={handleDrop}
+                className={`flex flex-col items-center justify-center w-full h-32 border-2 border-dashed rounded-xl cursor-pointer transition-all ${
+                  isDragging
+                    ? "border-blue-500 bg-blue-50"
+                    : "border-slate-300 hover:bg-slate-50 hover:border-blue-400"
+                }`}
+              >
                 <div className="flex flex-col items-center justify-center pt-5 pb-6">
                   {uploading ? (
                     <div className="w-10 h-10 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mb-2" />
@@ -366,7 +391,7 @@ export default function Home() {
                     <span className="material-icons-outlined text-4xl text-slate-400 mb-2">cloud_upload</span>
                   )}
                   <p className="text-sm text-slate-500 font-medium">
-                    {file ? file.name : "도서견적서.xlsx 파일을 선택하세요"}
+                    {file ? file.name : "파일을 드래그하거나 클릭하여 선택하세요 (.xlsx)"}
                   </p>
                 </div>
                 <input
