@@ -226,6 +226,11 @@ export default function Home() {
 
         if (searchRes.ok) {
           const searchData = await searchRes.json();
+          const schools: string[] = searchData.matched_schools || [];
+          const multiSchoolWarning =
+            schools.length > 1
+              ? ` (${schools.join(", ")} 등 ${schools.length}개 학교 동시 매칭 - 학교명을 더 정확히 입력하세요)`
+              : "";
           setManualBooks((prev) =>
             prev.map((b) =>
               b.id === book.id
@@ -234,7 +239,7 @@ export default function Home() {
                     isbn,
                     status: searchData.exists ? "found" : "not_found",
                     result: searchData.exists
-                      ? `✅ ${searchData.matched_school || book.school}에서 발견`
+                      ? `✅ ${searchData.matched_school || book.school}에서 발견${multiSchoolWarning}`
                       : `❌ ${book.school}에 없음 (${searchData.total_count || 0}권 타학교 보유)`,
                   }
                 : b

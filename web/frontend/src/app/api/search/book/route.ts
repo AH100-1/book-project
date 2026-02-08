@@ -21,10 +21,10 @@ export async function POST(request: NextRequest) {
     }
 
     // 여러 지역에서 검색
-    const { totalCount, books } = await searchISBNMultiRegion(isbn, region, 6);
+    const { totalCount, books } = await searchISBNMultiRegion(isbn);
 
     // 특정 학교 도서 찾기
-    const { found, matchedSchool } = findSchoolBooks(books, school);
+    const { found, matchedSchool, matchedSchools } = findSchoolBooks(books, school);
 
     const exists = found.length > 0;
 
@@ -35,6 +35,7 @@ export async function POST(request: NextRequest) {
       school_count: found.length,
       total_count: totalCount,
       matched_school: matchedSchool,
+      matched_schools: matchedSchools,
       books: found.slice(0, 5),
     });
   } catch (error) {

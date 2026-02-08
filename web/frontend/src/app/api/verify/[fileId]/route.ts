@@ -127,8 +127,8 @@ async function processVerification(jobId: string, ttbKey: string) {
         }
       } else {
         try {
-          const { totalCount, books } = await searchISBNMultiRegion(isbn13, region, 6);
-          const { found, matchedSchool: matched } = findSchoolBooks(books, school);
+          const { totalCount, books } = await searchISBNMultiRegion(isbn13);
+          const { found, matchedSchool: matched, matchedSchools } = findSchoolBooks(books, school);
 
           const exists = found.length > 0;
           existsMark = exists ? '✅' : '❌';
@@ -136,7 +136,9 @@ async function processVerification(jobId: string, ttbKey: string) {
 
           cache.setSearch(school, isbn13, exists, found.length, matchedSchool);
 
-          if (!exists) {
+          if (exists && matchedSchools.length > 1) {
+            reason = `동명 학교 ${matchedSchools.length}개 매칭: ${matchedSchools.join(', ')}`;
+          } else if (!exists) {
             if (totalCount === 0) {
               reason = '주요 지역에 등록된 도서 없음';
             } else {

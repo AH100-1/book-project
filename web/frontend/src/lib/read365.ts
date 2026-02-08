@@ -226,10 +226,10 @@ export async function searchISBNMultiRegion(
 export function findSchoolBooks(
   books: Read365Book[],
   schoolName: string
-): { found: Read365Book[]; matchedSchool: string | null } {
+): { found: Read365Book[]; matchedSchool: string | null; matchedSchools: string[] } {
   const normalizedSchool = schoolName.replace(/\s/g, '').toLowerCase();
   const found: Read365Book[] = [];
-  let matchedSchool: string | null = null;
+  const matchedSchoolSet = new Set<string>();
 
   for (const book of books) {
     const bookSchool = book.schoolName || '';
@@ -237,11 +237,12 @@ export function findSchoolBooks(
 
     if (normalizedBookSchool.includes(normalizedSchool) || normalizedSchool.includes(normalizedBookSchool)) {
       found.push(book);
-      if (!matchedSchool) {
-        matchedSchool = bookSchool;
+      if (bookSchool) {
+        matchedSchoolSet.add(bookSchool);
       }
     }
   }
 
-  return { found, matchedSchool };
+  const matchedSchools = [...matchedSchoolSet];
+  return { found, matchedSchool: matchedSchools[0] || null, matchedSchools };
 }
