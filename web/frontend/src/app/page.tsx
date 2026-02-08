@@ -39,11 +39,6 @@ type Mode = "file" | "manual";
 export default function Home() {
   const [mode, setMode] = useState<Mode>("file");
 
-  const [regions, setRegions] = useState<string[]>([]);
-  const [schoolLevels, setSchoolLevels] = useState<string[]>([]);
-  const [selectedRegion, setSelectedRegion] = useState("");
-  const [selectedLevel, setSelectedLevel] = useState("");
-
   const [file, setFile] = useState<File | null>(null);
   const [filePreview, setFilePreview] = useState<FilePreview | null>(null);
   const [uploading, setUploading] = useState(false);
@@ -60,22 +55,6 @@ export default function Home() {
     publisher: "",
   });
   const [isSearching, setIsSearching] = useState(false);
-
-  // 초기 데이터 로드
-  useEffect(() => {
-    Promise.all([
-      fetch(`${API_URL}/api/regions`).then((r) => r.json()),
-      fetch(`${API_URL}/api/school-levels`).then((r) => r.json()),
-      fetch(`${API_URL}/api/settings`).then((r) => r.json()),
-    ])
-      .then(([regionsData, levelsData, settingsData]) => {
-        setRegions(regionsData.regions || []);
-        setSchoolLevels(levelsData.school_levels || []);
-        setSelectedRegion(settingsData.region || regionsData.regions?.[0] || "");
-        setSelectedLevel(settingsData.school_level || levelsData.school_levels?.[0] || "");
-      })
-      .catch(console.error);
-  }, []);
 
   // 작업 상태 폴링
   useEffect(() => {
@@ -141,11 +120,7 @@ export default function Home() {
       const res = await fetch(`${API_URL}/api/verify/${filePreview.file_id}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          region: selectedRegion,
-          school_level: selectedLevel,
-          headless: true,
-        }),
+        body: JSON.stringify({}),
       });
       if (!res.ok) {
         const err = await res.json();
@@ -246,7 +221,6 @@ export default function Home() {
           body: JSON.stringify({
             isbn,
             school: book.school,
-            region: selectedRegion,
           }),
         });
 
@@ -362,58 +336,6 @@ export default function Home() {
             <span className="material-icons-outlined text-sm">edit_note</span>
             수동 입력
           </button>
-        </div>
-
-        {/* 설정 카드 */}
-        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 mb-6">
-          <h3 className="text-lg font-bold text-slate-800 mb-4 flex items-center gap-2">
-            <span className="w-1 h-5 bg-blue-500 rounded-full"></span>
-            검색 설정
-          </h3>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div>
-              <label className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2 block">
-                지역
-              </label>
-              <div className="relative">
-                <select
-                  value={selectedRegion}
-                  onChange={(e) => setSelectedRegion(e.target.value)}
-                  className="w-full bg-slate-50 border border-slate-200 text-slate-700 text-sm rounded-xl focus:ring-blue-500 focus:border-blue-500 block p-2.5 appearance-none font-medium"
-                >
-                  {regions.map((r) => (
-                    <option key={r} value={r}>
-                      {r}
-                    </option>
-                  ))}
-                </select>
-                <span className="material-icons-outlined absolute right-3 top-3 text-slate-400 pointer-events-none text-sm">
-                  expand_more
-                </span>
-              </div>
-            </div>
-            <div>
-              <label className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2 block">
-                학교급
-              </label>
-              <div className="relative">
-                <select
-                  value={selectedLevel}
-                  onChange={(e) => setSelectedLevel(e.target.value)}
-                  className="w-full bg-slate-50 border border-slate-200 text-slate-700 text-sm rounded-xl focus:ring-blue-500 focus:border-blue-500 block p-2.5 appearance-none font-medium"
-                >
-                  {schoolLevels.map((l) => (
-                    <option key={l} value={l}>
-                      {l}
-                    </option>
-                  ))}
-                </select>
-                <span className="material-icons-outlined absolute right-3 top-3 text-slate-400 pointer-events-none text-sm">
-                  expand_more
-                </span>
-              </div>
-            </div>
-          </div>
         </div>
 
         {/* ========== 파일 업로드 모드 ========== */}
