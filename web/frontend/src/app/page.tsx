@@ -8,6 +8,7 @@ interface BookRow {
   도서명: string;
   저자: string;
   출판사: string;
+  ISBN13?: string;
 }
 
 interface ResultRow {
@@ -53,6 +54,100 @@ function expandVolumeRange(title: string): string[] {
   return [title];
 }
 
+// 컬럼명 별칭 테이블
+const COLUMN_ALIASES: Record<string, string[]> = {
+  도서명: ["도서명", "서명", "책이름", "book", "title"],
+  저자: ["저자", "저자명", "작가", "지은이", "author"],
+  출판사: ["출판사", "출판", "publisher"],
+  학교명: ["학교명", "학교", "납품처", "school"],
+  ISBN: ["isbn", "isbn13", "isbn-13", "isbn 13"],
+};
+
+function normalizeHeader(val: string): string {
+  return String(val).trim().toLowerCase().replace(/[\s_-]+/g, "");
+}
+
+function detectHeaderAndColumns(ws: XLSX.WorkSheet): {
+  headerRow: number;
+  colMap: Record<string, number>;
+  detectedSchool: string;
+} | null {
+  const range = XLSX.utils.decode_range(ws["!ref"] || "A1");
+  const maxScanRow = Math.min(range.e.r, 29); // 최대 30행 탐색
+
+  for (let r = range.s.r; r <= maxScanRow; r++) {
+    const rowValues: Record<number, string> = {};
+    for (let c = range.s.c; c <= range.e.c; c++) {
+      const addr = XLSX.utils.encode_cell({ r, c });
+      const cell = ws[addr];
+      if (cell && cell.v != null) {
+        rowValues[c] = normalizeHeader(String(cell.v));
+      }
+    }
+
+    // "도서명" 키워드가 있는 행을 헤더로 판정
+    const hasTitle = Object.values(rowValues).some((v) =>
+      COLUMN_ALIASES["도서명"].some((alias) => normalizeHeader(alias) === v)
+    );
+    if (!hasTitle) continue;
+
+    // 각 필드의 컬럼 위치 매핑
+    const colMap: Record<string, number> = {};
+    for (const [field, aliases] of Object.entries(COLUMN_ALIASES)) {
+      for (const [colStr, val] of Object.entries(rowValues)) {
+        if (aliases.some((alias) => normalizeHeader(alias) === val)) {
+          colMap[field] = Number(colStr);
+          break;
+        }
+      }
+    }
+
+    // 숨겨진 ISBN 감지: 헤더에 없으면 데이터 행에서 978/979로 시작하는 13자리 숫자 찾기
+    // 첫 행이 비어있을 수 있으므로 최대 5행 탐색
+    if (!("ISBN" in colMap)) {
+      const scanEnd = Math.min(r + 5, range.e.r);
+      for (let dr = r + 1; dr <= scanEnd; dr++) {
+        for (let c = range.s.c; c <= range.e.c; c++) {
+          if (Object.values(colMap).includes(c)) continue;
+          const addr = XLSX.utils.encode_cell({ r: dr, c });
+          const cell = ws[addr];
+          if (cell && cell.v != null) {
+            const val = typeof cell.v === "number" ? cell.v.toFixed(0) : String(cell.v).replace(/[\s-]/g, "");
+            if (/^97[89]\d{10}$/.test(val)) {
+              colMap["ISBN"] = c;
+              break;
+            }
+          }
+        }
+        if ("ISBN" in colMap) break;
+      }
+    }
+
+    // 헤더 위 영역에서 학교명 자동 추출
+    let detectedSchool = "";
+    if (!("학교명" in colMap)) {
+      for (let sr = range.s.r; sr < r; sr++) {
+        for (let c = range.s.c; c <= range.e.c; c++) {
+          const cell = ws[XLSX.utils.encode_cell({ r: sr, c })];
+          if (cell && cell.v != null) {
+            const text = String(cell.v);
+            const match = text.match(/([\uAC00-\uD7A3]+(?:초등학교|중학교|고등학교|학교))/);
+            if (match) {
+              detectedSchool = match[1];
+              break;
+            }
+          }
+        }
+        if (detectedSchool) break;
+      }
+    }
+
+    return { headerRow: r, colMap, detectedSchool };
+  }
+
+  return null;
+}
+
 export default function Home() {
   const [mode, setMode] = useState<Mode>("file");
 
@@ -67,6 +162,9 @@ export default function Home() {
   const [isDragging, setIsDragging] = useState(false);
   const [previewPage, setPreviewPage] = useState(0);
   const PREVIEW_PER_PAGE = 10;
+  const [globalSchoolName, setGlobalSchoolName] = useState("");
+  const [hasSchoolColumn, setHasSchoolColumn] = useState(true);
+  const [hasISBNColumn, setHasISBNColumn] = useState(false);
 
   // 수동 입력 모드용 상태
   const [manualBooks, setManualBooks] = useState<ManualBook[]>([]);
@@ -85,26 +183,86 @@ export default function Home() {
       try {
         const data = new Uint8Array(e.target!.result as ArrayBuffer);
         const wb = XLSX.read(data, { type: "array" });
-        const ws = wb.Sheets[wb.SheetNames[0]];
-        const rows = XLSX.utils.sheet_to_json<Record<string, string>>(ws);
 
-        if (rows.length === 0) {
+        // 모든 시트를 탐색하여 가장 많은 컬럼이 매핑되는 시트 선택
+        let bestWs: XLSX.WorkSheet | null = null;
+        let bestDetected: { headerRow: number; colMap: Record<string, number>; detectedSchool: string } | null = null;
+        let bestColCount = 0;
+        for (const sheetName of wb.SheetNames) {
+          const ws = wb.Sheets[sheetName];
+          const detected = detectHeaderAndColumns(ws);
+          if (detected) {
+            const colCount = Object.keys(detected.colMap).length;
+            if (colCount > bestColCount) {
+              bestWs = ws;
+              bestDetected = detected;
+              bestColCount = colCount;
+            }
+          }
+        }
+
+        if (!bestWs || !bestDetected) {
+          alert("도서명 컬럼을 찾을 수 없습니다. 엑셀에 '도서명' 열이 있는지 확인해주세요.");
+          return;
+        }
+
+        const ws = bestWs;
+        const { headerRow, colMap } = bestDetected;
+        const range = XLSX.utils.decode_range(ws["!ref"] || "A1");
+
+        const schoolCol = colMap["학교명"];
+        const titleCol = colMap["도서명"];
+        const authorCol = colMap["저자"];
+        const pubCol = colMap["출판사"];
+        const isbnCol = colMap["ISBN"];
+
+        const foundSchool = schoolCol !== undefined;
+        const foundISBN = isbnCol !== undefined;
+        setHasSchoolColumn(foundSchool);
+        setHasISBNColumn(foundISBN);
+
+        const parsed: BookRow[] = [];
+        for (let r = headerRow + 1; r <= range.e.r; r++) {
+          const getCell = (c: number | undefined): string => {
+            if (c === undefined) return "";
+            const addr = XLSX.utils.encode_cell({ r, c });
+            const cell = ws[addr];
+            if (!cell || cell.v == null) return "";
+            return String(cell.v).trim();
+          };
+
+          const title = getCell(titleCol);
+          if (!title) continue; // 빈 행 스킵
+
+          // 합계/소계/비도서 행 스킵
+          const titleLower = title.replace(/\s+/g, "");
+          if (/^(합계|총계|소계|계$|총\d)/.test(titleLower)) continue;
+          if (/마크|라벨|배송|부가세|공급가/.test(titleLower)) continue;
+
+          let isbn = "";
+          if (isbnCol !== undefined) {
+            const addr = XLSX.utils.encode_cell({ r, c: isbnCol });
+            const cell = ws[addr];
+            if (cell && cell.v != null) {
+              // 숫자형이면 지수 표기 방지
+              isbn = typeof cell.v === "number" ? cell.v.toFixed(0) : String(cell.v).trim();
+              isbn = isbn.replace(/[\s-]/g, "");
+            }
+          }
+
+          parsed.push({
+            학교명: getCell(schoolCol),
+            도서명: title,
+            저자: getCell(authorCol),
+            출판사: getCell(pubCol),
+            ...(isbn ? { ISBN13: isbn } : {}),
+          });
+        }
+
+        if (parsed.length === 0) {
           alert("파일에 데이터가 없습니다");
           return;
         }
-
-        const first = rows[0];
-        if (!("학교명" in first) || !("도서명" in first)) {
-          alert("필수 열이 없습니다: 학교명, 도서명, 저자, 출판사");
-          return;
-        }
-
-        const parsed: BookRow[] = rows.map((r) => ({
-          학교명: r["학교명"] || "",
-          도서명: r["도서명"] || "",
-          저자: r["저자"] || "",
-          출판사: r["출판사"] || "",
-        }));
 
         setFile(selectedFile);
         setParsedRows(parsed);
@@ -112,6 +270,7 @@ export default function Home() {
         setResults([]);
         setProgress(0);
         setMessage("");
+        if (!foundSchool) setGlobalSchoolName(bestDetected.detectedSchool || "");
       } catch {
         alert("엑셀 파일 파싱에 실패했습니다");
       }
@@ -144,12 +303,16 @@ export default function Home() {
     setProgress(0);
     setMessage("처리 시작...");
 
-    // 권수 범위 확장 (예: ".1-2" → 1권, 2권 각각)
+    // 권수 범위 확장 (예: ".1-2" → 1권, 2권 각각) — ISBN이 있는 행은 이미 정확한 도서이므로 확장 불필요
     const expandedRows: BookRow[] = [];
     for (const row of parsedRows) {
-      const titles = expandVolumeRange(row.도서명);
-      for (const title of titles) {
-        expandedRows.push({ ...row, 도서명: title });
+      if (row.ISBN13) {
+        expandedRows.push(row);
+      } else {
+        const titles = expandVolumeRange(row.도서명);
+        for (const title of titles) {
+          expandedRows.push({ ...row, 도서명: title });
+        }
       }
     }
 
@@ -159,30 +322,34 @@ export default function Home() {
 
     for (let i = 0; i < total; i++) {
       const row = expandedRows[i];
+      // 학교명 보정: 컬럼에 없으면 globalSchoolName 적용
+      const school = row.학교명 || globalSchoolName;
       setProgress(i);
       setMessage(`처리 중: ${i + 1}/${total} - ${row.도서명.slice(0, 20)}...`);
 
-      let isbn = "";
+      let isbn = row.ISBN13 || "";
       let candidateCount = 0;
       let reason = "";
       let existsMark = "❌";
       let matchedSchool = "";
 
-      // 1. 알라딘 API로 ISBN 검색
-      try {
-        const res = await fetch("/api/search/aladin", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ title: row.도서명, author: row.저자 }),
-        });
-        if (res.ok) {
-          const data = await res.json();
-          isbn = data.isbn13 || "";
-          candidateCount = data.candidate_count || 0;
-          if (!isbn) reason = `알라딘 ISBN 미확인: ${data.error || "알 수 없음"}`;
+      // 1. 알라딘 API로 ISBN 검색 (엑셀에 ISBN이 있으면 스킵)
+      if (!isbn) {
+        try {
+          const res = await fetch("/api/search/aladin", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ title: row.도서명, author: row.저자 }),
+          });
+          if (res.ok) {
+            const data = await res.json();
+            isbn = data.isbn13 || "";
+            candidateCount = data.candidate_count || 0;
+            if (!isbn) reason = `알라딘 ISBN 미확인: ${data.error || "알 수 없음"}`;
+          }
+        } catch (e) {
+          reason = `알라딘 오류: ${e}`;
         }
-      } catch (e) {
-        reason = `알라딘 오류: ${e}`;
       }
 
       // 2. Read365 검색
@@ -192,13 +359,13 @@ export default function Home() {
           const res = await fetch("/api/search/book", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ isbn, school: row.학교명 }),
+            body: JSON.stringify({ isbn, school }),
           });
           if (res.ok) {
             const data = await res.json();
             const schools: string[] = data.matched_schools || [];
             existsMark = data.exists ? "✅" : "❌";
-            matchedSchool = data.matched_school || row.학교명;
+            matchedSchool = data.matched_school || school;
 
             if (data.exists) {
               // 독서로 검색 위치 정보
@@ -217,7 +384,7 @@ export default function Home() {
               if (data.total_count === 0) {
                 reason = "주요 지역에 등록된 도서 없음";
               } else {
-                reason = `${row.학교명}에 없음 (타 학교 ${data.total_count}권 보유)`;
+                reason = `${school}에 없음 (타 학교 ${data.total_count}권 보유)`;
                 if (candidateCount > 1) {
                   reason += ` - 동일 제목 ${candidateCount}개 버전 존재, 도서명을 더 정확히 입력하세요`;
                 }
@@ -230,12 +397,12 @@ export default function Home() {
       }
 
       newResults.push({
-        학교명: row.학교명,
+        학교명: school,
         도서명: row.도서명,
         저자: row.저자,
         출판사: row.출판사,
         ISBN13: isbn,
-        검색학교: matchedSchool || row.학교명,
+        검색학교: matchedSchool || school,
         존재여부: existsMark,
         독서로: read365Info,
         사유: reason,
@@ -275,6 +442,9 @@ export default function Home() {
     setProgress(0);
     setTotalItems(0);
     setMessage("");
+    setGlobalSchoolName("");
+    setHasSchoolColumn(true);
+    setHasISBNColumn(false);
   };
 
   // 수동 입력: 도서 추가 (권수 범위 자동 확장)
@@ -488,20 +658,44 @@ export default function Home() {
 
               {parsedRows.length > 0 && !processing && results.length === 0 && (
                 <div className="mt-4">
-                  <div className="flex items-center gap-2 mb-3">
+                  <div className="flex items-center gap-2 mb-3 flex-wrap">
                     <span className="bg-blue-100 text-blue-700 text-xs px-2 py-1 rounded font-bold">
                       {parsedRows.length}권
                     </span>
                     <span className="text-slate-600 text-sm font-medium">의 도서가 포함되어 있습니다</span>
+                    {hasISBNColumn && (
+                      <span className="bg-green-100 text-green-700 text-xs px-2 py-1 rounded font-bold">ISBN 포함</span>
+                    )}
+                    {!hasSchoolColumn && (
+                      <span className="bg-amber-100 text-amber-700 text-xs px-2 py-1 rounded font-bold">학교명 미포함</span>
+                    )}
                   </div>
+
+                  {!hasSchoolColumn && (
+                    <div className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded-xl">
+                      <label className="text-xs font-bold text-amber-600 uppercase tracking-wider mb-2 block">
+                        학교명 입력 <span className="text-red-500">*</span>
+                      </label>
+                      <input
+                        type="text"
+                        value={globalSchoolName}
+                        onChange={(e) => setGlobalSchoolName(e.target.value)}
+                        placeholder="예: 수택고등학교"
+                        className="w-full bg-white border border-amber-300 text-slate-700 text-sm rounded-xl focus:ring-amber-500 focus:border-amber-500 block p-2.5 font-medium"
+                      />
+                      <p className="text-xs text-amber-500 mt-1">엑셀에 학교명 컬럼이 없습니다. 검증에 사용할 학교명을 입력해주세요.</p>
+                    </div>
+                  )}
+
                   <div className="overflow-x-auto">
                     <table className="w-full text-sm text-left">
                       <thead className="text-xs text-slate-500 uppercase bg-slate-50 border-b border-slate-100">
                         <tr>
-                          <th className="px-4 py-3 font-bold">학교명</th>
+                          {hasSchoolColumn && <th className="px-4 py-3 font-bold">학교명</th>}
                           <th className="px-4 py-3 font-bold">도서명</th>
                           <th className="px-4 py-3 font-bold">저자</th>
                           <th className="px-4 py-3 font-bold">출판사</th>
+                          {hasISBNColumn && <th className="px-4 py-3 font-bold">ISBN</th>}
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-100">
@@ -509,10 +703,11 @@ export default function Home() {
                           .slice(previewPage * PREVIEW_PER_PAGE, (previewPage + 1) * PREVIEW_PER_PAGE)
                           .map((row, i) => (
                           <tr key={i} className="bg-white hover:bg-slate-50 transition-colors">
-                            <td className="px-4 py-3 font-medium text-slate-700">{row.학교명}</td>
+                            {hasSchoolColumn && <td className="px-4 py-3 font-medium text-slate-700">{row.학교명}</td>}
                             <td className="px-4 py-3 text-slate-600">{row.도서명}</td>
                             <td className="px-4 py-3 text-slate-500">{row.저자}</td>
                             <td className="px-4 py-3 text-slate-500">{row.출판사}</td>
+                            {hasISBNColumn && <td className="px-4 py-3 font-mono text-xs text-slate-400">{row.ISBN13 || "-"}</td>}
                           </tr>
                         ))}
                       </tbody>
@@ -548,7 +743,8 @@ export default function Home() {
             {parsedRows.length > 0 && !processing && results.length === 0 && (
               <button
                 onClick={startVerification}
-                className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-6 rounded-xl shadow-sm hover:shadow-md transition-all flex items-center justify-center gap-2"
+                disabled={!hasSchoolColumn && !globalSchoolName}
+                className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white font-semibold py-3 px-6 rounded-xl shadow-sm hover:shadow-md transition-all flex items-center justify-center gap-2"
               >
                 <span className="material-icons-outlined text-sm">play_circle</span>
                 검증 시작
