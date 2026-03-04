@@ -412,12 +412,27 @@ export default function Home() {
       setResults(newResults.filter(Boolean));
     };
 
-    // 5개씩 병렬 처리
+    // 슬라이딩 윈도우: 항상 5개가 동시 실행, 1개 끝나면 바로 다음 투입
     const CONCURRENCY = 5;
-    for (let i = 0; i < total; i += CONCURRENCY) {
-      const batch = expandedRows.slice(i, i + CONCURRENCY).map((_, j) => processOne(i + j));
-      await Promise.all(batch);
-    }
+    let nextIdx = 0;
+    await new Promise<void>((resolveAll) => {
+      let running = 0;
+      const launch = () => {
+        while (running < CONCURRENCY && nextIdx < total) {
+          const idx = nextIdx++;
+          running++;
+          processOne(idx).finally(() => {
+            running--;
+            if (nextIdx >= total && running === 0) {
+              resolveAll();
+            } else {
+              launch();
+            }
+          });
+        }
+      };
+      launch();
+    });
 
     setProgress(total);
     setMessage(`완료! ${total}권 처리됨${total !== parsedRows.length ? ` (원본 ${parsedRows.length}행, 권수 확장 ${total}권)` : ""}`);
