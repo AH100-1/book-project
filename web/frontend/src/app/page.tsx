@@ -412,8 +412,8 @@ export default function Home() {
       setResults(newResults.filter(Boolean));
     };
 
-    // 슬라이딩 윈도우: 항상 5개가 동시 실행, 1개 끝나면 바로 다음 투입
-    const CONCURRENCY = 5;
+    // 슬라이딩 윈도우: 항상 10개가 동시 실행, 1개 끝나면 바로 다음 투입
+    const CONCURRENCY = 10;
     let nextIdx = 0;
     await new Promise<void>((resolveAll) => {
       let running = 0;
