@@ -318,14 +318,13 @@ export default function Home() {
 
     const total = expandedRows.length;
     setTotalItems(total);
-    const newResults: ResultRow[] = [];
+    const newResults: ResultRow[] = new Array(total);
+    let completedCount = 0;
 
-    for (let i = 0; i < total; i++) {
+    // 한 권 처리 함수
+    const processOne = async (i: number) => {
       const row = expandedRows[i];
-      // 학교명 보정: 컬럼에 없으면 globalSchoolName 적용
       const school = row.학교명 || globalSchoolName;
-      setProgress(i);
-      setMessage(`처리 중: ${i + 1}/${total} - ${row.도서명.slice(0, 20)}...`);
 
       let isbn = row.ISBN13 || "";
       let candidateCount = 0;
@@ -368,7 +367,6 @@ export default function Home() {
             matchedSchool = data.matched_school || school;
 
             if (data.exists) {
-              // 독서로 검색 위치 정보
               const region = data.matched_region || "";
               const page = data.matched_page || "";
               if (region && page) {
@@ -396,7 +394,7 @@ export default function Home() {
         }
       }
 
-      newResults.push({
+      newResults[i] = {
         학교명: school,
         도서명: row.도서명,
         저자: row.저자,
@@ -406,10 +404,19 @@ export default function Home() {
         존재여부: existsMark,
         독서로: read365Info,
         사유: reason,
-      });
+      };
 
-      setResults([...newResults]);
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      completedCount++;
+      setProgress(completedCount);
+      setMessage(`처리 중: ${completedCount}/${total} - ${row.도서명.slice(0, 20)}...`);
+      setResults(newResults.filter(Boolean));
+    };
+
+    // 5개씩 병렬 처리
+    const CONCURRENCY = 5;
+    for (let i = 0; i < total; i += CONCURRENCY) {
+      const batch = expandedRows.slice(i, i + CONCURRENCY).map((_, j) => processOne(i + j));
+      await Promise.all(batch);
     }
 
     setProgress(total);
