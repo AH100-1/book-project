@@ -191,23 +191,22 @@ export async function searchISBNAllPages(
 }
 
 /**
- * 다중 지역 검색 - 학교명 매칭 기반 조기 종료 최적화
+ * 다중 지역 검색 - 전 지역의 모든 페이지를 병렬로 받음
+ * (페이지 내 정렬이 가나다순이 아니라 학교가 임의 페이지에 등장하므로 전 페이지 조회 필수)
  *
- * 전략:
- * 1) 17개 지역 1페이지만 병렬 요청 (각 지역 totalCount 파악)
- * 2) schoolName이 주어지면, 1페이지에서 매칭된 지역만 나머지 페이지를 받아옴
- * 3) 매칭 지역이 없으면 → 추가 호출 없이 빠르게 "없음" 처리
- *
- * schoolName이 없으면 기존처럼 전 지역 모든 페이지를 받음.
+ * 인자:
+ *   primaryRegion: 우선 지역 (검색 순서에만 영향, 모든 지역은 어차피 다 받음)
+ *   schoolName: 호환성용 인자 - 결과 정확성을 위해 무시됨
  */
 export async function searchISBNMultiRegion(
   isbn: string,
   primaryRegion?: string | null,
-  schoolName?: string | null
+  _schoolName?: string | null
 ): Promise<{
   totalCount: number;
   books: Read365Book[];
 }> {
+  void _schoolName;
   const searchRegions: string[] = [];
 
   if (primaryRegion) {
@@ -218,80 +217,18 @@ export async function searchISBNMultiRegion(
     if (!searchRegions.includes(code)) searchRegions.push(code);
   }
 
-  // 학교명이 없으면 기존 동작(모든 지역 모든 페이지)
-  if (!schoolName) {
-    const results = await Promise.allSettled(
-      searchRegions.map((rc) => searchISBNAllPages(isbn, rc))
-    );
-    let totalCount = 0;
-    const allBooks: Read365Book[] = [];
-    for (const r of results) {
-      if (r.status === 'fulfilled') {
-        totalCount += r.value.length;
-        allBooks.push(...r.value);
-      }
-    }
-    return { totalCount, books: allBooks };
-  }
-
-  // === 학교명 기반 조기 종료 ===
-  const normalizedSchool = schoolName.replace(/\s/g, '').toLowerCase();
-  const matches = (s: string | undefined): boolean => {
-    if (!s) return false;
-    const n = s.replace(/\s/g, '').toLowerCase();
-    return n.includes(normalizedSchool) || normalizedSchool.includes(n);
-  };
-
-  // 1단계: 모든 지역 1페이지 병렬
-  const firstResults = await Promise.allSettled(
-    searchRegions.map(async (rc) => {
-      const r = await searchISBN(isbn, rc, 1, 100);
-      for (const b of r.books) {
-        b._page = 1;
-        b._provCode = rc;
-      }
-      return { rc, totalPages: r.totalPages, totalCount: r.totalCount, books: r.books };
-    })
+  const results = await Promise.allSettled(
+    searchRegions.map((rc) => searchISBNAllPages(isbn, rc))
   );
 
   let totalCount = 0;
   const allBooks: Read365Book[] = [];
-  const regionsToExpand: { rc: string; totalPages: number }[] = [];
-
-  for (const r of firstResults) {
-    if (r.status !== 'fulfilled') continue;
-    const { rc, totalPages, totalCount: rTotal, books } = r.value;
-    totalCount += rTotal; // 1페이지 합이 아닌 실제 지역별 총 권수 사용
-    allBooks.push(...books);
-
-    // 이 지역 1페이지에 학교가 매칭됐고, 남은 페이지가 있으면 확장 대상
-    if (totalPages > 1 && books.some((b) => matches(b.schoolName))) {
-      regionsToExpand.push({ rc, totalPages });
+  for (const r of results) {
+    if (r.status === 'fulfilled') {
+      totalCount += r.value.length;
+      allBooks.push(...r.value);
     }
   }
-
-  // 2단계: 매칭된 지역만 2~N 페이지 병렬 호출
-  if (regionsToExpand.length > 0) {
-    const expandPromises: Promise<Read365Book[]>[] = [];
-    for (const { rc, totalPages } of regionsToExpand) {
-      for (let p = 2; p <= totalPages; p++) {
-        expandPromises.push(
-          searchISBN(isbn, rc, p, 100).then((r) => {
-            for (const b of r.books) {
-              b._page = p;
-              b._provCode = rc;
-            }
-            return r.books;
-          })
-        );
-      }
-    }
-    const expanded = await Promise.allSettled(expandPromises);
-    for (const e of expanded) {
-      if (e.status === 'fulfilled') allBooks.push(...e.value);
-    }
-  }
-
   return { totalCount, books: allBooks };
 }
 
