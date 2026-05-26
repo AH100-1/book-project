@@ -20,8 +20,8 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // 여러 지역에서 검색
-    const { totalCount, books } = await searchISBNMultiRegion(isbn);
+    // 여러 지역에서 검색 (학교명 매칭 지역만 모든 페이지 받아오는 최적화 적용)
+    const { totalCount, books } = await searchISBNMultiRegion(isbn, region || null, school);
 
     // 특정 학교 도서 찾기
     const { found, matchedSchool, matchedSchools, matchedRegion, matchedPage } = findSchoolBooks(books, school);

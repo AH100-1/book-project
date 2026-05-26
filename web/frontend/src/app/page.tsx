@@ -321,6 +321,62 @@ export default function Home() {
     const newResults: ResultRow[] = new Array(total);
     let completedCount = 0;
 
+    // 같은 검증 작업 내 중복 호출 제거용 캐시
+    // - aladinCache: 제목+저자 → ISBN 검색 결과
+    // - bookCache: 학교+ISBN → Read365 검색 결과
+    interface AladinCached { isbn13: string; candidateCount: number; error: string | null }
+    interface BookCached {
+      exists: boolean;
+      matched_school: string | null;
+      matched_schools: string[];
+      matched_region: string | null;
+      matched_page: number | null;
+      total_count: number;
+    }
+    const aladinCache = new Map<string, Promise<AladinCached>>();
+    const bookCache = new Map<string, Promise<BookCached>>();
+
+    const getAladin = (title: string, author: string): Promise<AladinCached> => {
+      const key = `${title} ${author}`;
+      const hit = aladinCache.get(key);
+      if (hit) return hit;
+      const p = fetch("/api/search/aladin", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title, author }),
+      })
+        .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+        .then((d) => ({
+          isbn13: d.isbn13 || "",
+          candidateCount: d.candidate_count || 0,
+          error: d.error || null,
+        }));
+      aladinCache.set(key, p);
+      return p;
+    };
+
+    const getBook = (isbn: string, school: string): Promise<BookCached> => {
+      const key = `${school} ${isbn}`;
+      const hit = bookCache.get(key);
+      if (hit) return hit;
+      const p = fetch("/api/search/book", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ isbn, school }),
+      })
+        .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+        .then((d) => ({
+          exists: !!d.exists,
+          matched_school: d.matched_school || null,
+          matched_schools: d.matched_schools || [],
+          matched_region: d.matched_region || null,
+          matched_page: d.matched_page || null,
+          total_count: d.total_count || 0,
+        }));
+      bookCache.set(key, p);
+      return p;
+    };
+
     // 한 권 처리 함수
     const processOne = async (i: number) => {
       const row = expandedRows[i];
@@ -332,36 +388,24 @@ export default function Home() {
       let existsMark = "❌";
       let matchedSchool = "";
 
-      // 1. 알라딘 API로 ISBN 검색 (엑셀에 ISBN이 있으면 스킵)
+      // 1. 알라딘 API로 ISBN 검색 (엑셀에 ISBN이 있으면 스킵, 동일 제목+저자는 캐시 공유)
       if (!isbn) {
         try {
-          const res = await fetch("/api/search/aladin", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ title: row.도서명, author: row.저자 }),
-          });
-          if (res.ok) {
-            const data = await res.json();
-            isbn = data.isbn13 || "";
-            candidateCount = data.candidate_count || 0;
-            if (!isbn) reason = `알라딘 ISBN 미확인: ${data.error || "알 수 없음"}`;
-          }
+          const data = await getAladin(row.도서명, row.저자);
+          isbn = data.isbn13;
+          candidateCount = data.candidateCount;
+          if (!isbn) reason = `알라딘 ISBN 미확인: ${data.error || "알 수 없음"}`;
         } catch (e) {
           reason = `알라딘 오류: ${e}`;
         }
       }
 
-      // 2. Read365 검색
+      // 2. Read365 검색 (동일 학교+ISBN은 캐시 공유)
       let read365Info = "";
       if (isbn) {
         try {
-          const res = await fetch("/api/search/book", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ isbn, school }),
-          });
-          if (res.ok) {
-            const data = await res.json();
+          const data = await getBook(isbn, school);
+          {
             const schools: string[] = data.matched_schools || [];
             existsMark = data.exists ? "✅" : "❌";
             matchedSchool = data.matched_school || school;
