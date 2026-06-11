@@ -88,6 +88,12 @@ interface Read365ApiResponse {
   };
 }
 
+// 일시적 장애로 간주하고 재시도할 HTTP 상태 코드
+const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
+const MAX_RETRIES = 3;
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
 export async function searchISBN(
   isbn: string,
   provCode?: string | null,
@@ -110,45 +116,71 @@ export async function searchISBN(
     payload.page = page;
   }
 
-  if (pageSize !== 100) {
-    payload.rows = pageSize;
+  // read365는 페이지 크기 파라미터로 'display'를 사용한다 ('rows'는 무시되어 항상 10개만 반환됨).
+  // display는 최대 100까지만 정상 동작 — 그 이상은 totalPage만 커지고 실제 응답은 100개로 잘려 누락이 발생한다.
+  payload.display = Math.min(pageSize, 100);
+
+  let lastError: unknown;
+
+  // 429/5xx 및 네트워크 오류는 지수 백오프로 재시도 (조용한 지역 누락 방지)
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          'Accept': 'application/json, text/plain, */*',
+          'Accept-Language': 'ko-KR,ko;q=0.9,en;q=0.8',
+        },
+        body: JSON.stringify(payload),
+      });
+
+      if (!response.ok) {
+        // 재시도 가능한 상태면 백오프 후 재시도, 그 외엔 즉시 실패
+        if (RETRYABLE_STATUS.has(response.status) && attempt < MAX_RETRIES) {
+          lastError = new Error(`HTTP ${response.status}`);
+          await sleep(300 * 2 ** attempt + Math.floor(Math.random() * 200));
+          continue;
+        }
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      const data: Read365ApiResponse = await response.json();
+
+      if (data.status === 'OK' && data.data) {
+        return {
+          totalCount: data.data.allTotalCount || 0,
+          totalPages: data.data.totalPage || 0,
+          books: data.data.bookList || [],
+        };
+      }
+
+      // 잘못된 ISBN 등 클라이언트 오류는 정상적인 "0건"으로 처리
+      if (data.status === 'BAD_REQUEST') {
+        return { totalCount: 0, totalPages: 0, books: [] };
+      }
+
+      // 그 외 비정상 status(부하/throttle 등)는 일시 장애로 간주 — 재시도 후 소진 시 throw.
+      // (예전엔 여기서 빈 결과를 조용히 반환해 페이지네이션이 조기 종료되며 도서가 누락됐다)
+      if (attempt < MAX_RETRIES) {
+        lastError = new Error(`status ${data.status}`);
+        await sleep(300 * 2 ** attempt + Math.floor(Math.random() * 200));
+        continue;
+      }
+      throw new Error(`Read365 비정상 응답 status=${data.status}`);
+    } catch (error) {
+      lastError = error;
+      // 네트워크 오류(fetch throw)도 재시도
+      if (attempt < MAX_RETRIES) {
+        await sleep(300 * 2 ** attempt + Math.floor(Math.random() * 200));
+        continue;
+      }
+    }
   }
 
-  try {
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Accept': 'application/json, text/plain, */*',
-        'Accept-Language': 'ko-KR,ko;q=0.9,en;q=0.8',
-      },
-      body: JSON.stringify(payload),
-    });
-
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
-    }
-
-    const data: Read365ApiResponse = await response.json();
-
-    if (data.status === 'OK' && data.data) {
-      return {
-        totalCount: data.data.allTotalCount || 0,
-        totalPages: data.data.totalPage || 0,
-        books: data.data.bookList || [],
-      };
-    }
-
-    return {
-      totalCount: 0,
-      totalPages: 0,
-      books: [],
-    };
-  } catch (error) {
-    console.error('Read365 API 오류:', error);
-    throw error;
-  }
+  console.error('Read365 API 오류 (재시도 소진):', lastError);
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 
 /**
@@ -159,30 +191,43 @@ export async function searchISBNAllPages(
   provCode?: string | null
 ): Promise<Read365Book[]> {
   const allBooks: Read365Book[] = [];
-  let page = 1;
 
-  while (true) {
-    const result = await searchISBN(isbn, provCode, page, 100);
+  // 1페이지로 전체 페이지 수를 확정한다. 이후 페이지가 부하로 비어서 오는 경우와
+  // "진짜 0건"을 구분하는 기준이 된다.
+  const first = await searchISBN(isbn, provCode, 1, 100);
+  if (first.books.length === 0) {
+    return allBooks; // 진짜 0건
+  }
+  for (const book of first.books) {
+    book._page = 1;
+    book._provCode = provCode || undefined;
+  }
+  allBooks.push(...first.books);
 
+  const totalPages = first.totalPages;
+
+  for (let page = 2; page <= totalPages; page++) {
+    // API 부하 방지
+    await sleep(100);
+    let result = await searchISBN(isbn, provCode, page, 100);
+
+    // 마지막 페이지가 아닌데 빈 결과면 부하로 인한 누락 가능성 → 한 번 더 시도
     if (result.books.length === 0) {
-      break;
+      await sleep(500);
+      result = await searchISBN(isbn, provCode, page, 100);
     }
 
-    // 각 도서에 페이지 번호와 지역 코드 기록
+    // 재시도에도 비어 있으면 이 지역 결과가 불완전하다는 뜻 — 부분 데이터로
+    // 잘못된 "없음"을 내지 않도록 throw하여 상위에서 실패 지역으로 표면화한다.
+    if (result.books.length === 0) {
+      throw new Error(`Read365 페이지 누락: prov=${provCode ?? '전체'} page=${page}/${totalPages}`);
+    }
+
     for (const book of result.books) {
       book._page = page;
       book._provCode = provCode || undefined;
     }
-
     allBooks.push(...result.books);
-
-    if (page >= result.totalPages) {
-      break;
-    }
-
-    page++;
-    // API 부하 방지
-    await new Promise(resolve => setTimeout(resolve, 100));
   }
 
   return allBooks;
@@ -195,6 +240,7 @@ export async function searchISBNMultiRegion(
 ): Promise<{
   totalCount: number;
   books: Read365Book[];
+  failedRegions: string[];
 }> {
   const searchRegions: string[] = [];
 
@@ -220,15 +266,20 @@ export async function searchISBNMultiRegion(
 
   let totalCount = 0;
   const allBooks: Read365Book[] = [];
+  const failedRegions: string[] = [];
 
-  for (const result of results) {
+  results.forEach((result, idx) => {
     if (result.status === 'fulfilled') {
       totalCount += result.value.length;
       allBooks.push(...result.value);
+    } else {
+      // 재시도까지 소진하고 실패한 지역 — 조용히 누락시키지 않고 표면화
+      const code = searchRegions[idx];
+      failedRegions.push(PROV_CODE_TO_NAME[code] || code);
     }
-  }
+  });
 
-  return { totalCount, books: allBooks };
+  return { totalCount, books: allBooks, failedRegions };
 }
 
 // 지역 코드 → 지역명 역매핑
