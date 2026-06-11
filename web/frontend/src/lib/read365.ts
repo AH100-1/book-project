@@ -184,52 +184,54 @@ export async function searchISBN(
 }
 
 /**
- * ISBN으로 모든 페이지를 검색하여 전체 결과 반환
+ * ISBN으로 모든 페이지를 검색하여 전체 결과 반환 (2페이지부터 병렬 호출)
  */
 export async function searchISBNAllPages(
   isbn: string,
   provCode?: string | null
 ): Promise<Read365Book[]> {
-  const allBooks: Read365Book[] = [];
+  const tag = (books: Read365Book[], page: number) => {
+    for (const book of books) {
+      book._page = page;
+      book._provCode = provCode || undefined;
+    }
+    return books;
+  };
 
   // 1페이지로 전체 페이지 수를 확정한다. 이후 페이지가 부하로 비어서 오는 경우와
   // "진짜 0건"을 구분하는 기준이 된다.
   const first = await searchISBN(isbn, provCode, 1, 100);
   if (first.books.length === 0) {
-    return allBooks; // 진짜 0건
+    return []; // 진짜 0건
   }
-  for (const book of first.books) {
-    book._page = 1;
-    book._provCode = provCode || undefined;
-  }
-  allBooks.push(...first.books);
+  tag(first.books, 1);
 
   const totalPages = first.totalPages;
-
-  for (let page = 2; page <= totalPages; page++) {
-    // API 부하 방지
-    await sleep(100);
-    let result = await searchISBN(isbn, provCode, page, 100);
-
-    // 마지막 페이지가 아닌데 빈 결과면 부하로 인한 누락 가능성 → 한 번 더 시도
-    if (result.books.length === 0) {
-      await sleep(500);
-      result = await searchISBN(isbn, provCode, page, 100);
-    }
-
-    // 재시도에도 비어 있으면 이 지역 결과가 불완전하다는 뜻 — 부분 데이터로
-    // 잘못된 "없음"을 내지 않도록 throw하여 상위에서 실패 지역으로 표면화한다.
-    if (result.books.length === 0) {
-      throw new Error(`Read365 페이지 누락: prov=${provCode ?? '전체'} page=${page}/${totalPages}`);
-    }
-
-    for (const book of result.books) {
-      book._page = page;
-      book._provCode = provCode || undefined;
-    }
-    allBooks.push(...result.books);
+  if (totalPages <= 1) {
+    return first.books;
   }
 
+  // 2..N 페이지를 병렬로 호출한다. searchISBN이 429/5xx·비정상 status·네트워크 오류를
+  // 재시도로 처리하므로, 끝내 비거나 실패한 페이지는 throw → Promise.all이 reject되어
+  // 이 지역 전체가 상위(searchISBNMultiRegion)에서 "실패 지역"으로 표면화된다.
+  // (부분 데이터로 잘못된 "없음"을 내지 않기 위함)
+  const pagePromises: Promise<Read365Book[]>[] = [];
+  for (let page = 2; page <= totalPages; page++) {
+    pagePromises.push(
+      searchISBN(isbn, provCode, page, 100).then((result) => {
+        if (result.books.length === 0) {
+          throw new Error(`Read365 페이지 누락: prov=${provCode ?? '전체'} page=${page}/${totalPages}`);
+        }
+        return tag(result.books, page);
+      })
+    );
+  }
+
+  const rest = await Promise.all(pagePromises);
+  const allBooks: Read365Book[] = [...first.books];
+  for (const books of rest) {
+    allBooks.push(...books);
+  }
   return allBooks;
 }
 
