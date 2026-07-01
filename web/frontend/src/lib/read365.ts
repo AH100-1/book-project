@@ -314,7 +314,10 @@ export function findSchoolBooks(
     const bookSchool = book.schoolName || '';
     const normalizedBookSchool = bookSchool.replace(/\s/g, '').toLowerCase();
 
-    if (normalizedBookSchool.includes(normalizedSchool) || normalizedSchool.includes(normalizedBookSchool)) {
+    // 등록된 학교명이 검색 키워드를 포함해야 매칭.
+    // 반대 방향(검색어가 등록명을 포함)은 "다산가람초등학교" 검색 시 경남 "가람초등학교"가
+    // 잘못 매칭되는 등 false positive를 일으켜 제거.
+    if (normalizedBookSchool.includes(normalizedSchool)) {
       found.push(book);
       if (bookSchool) {
         matchedSchoolSet.add(bookSchool);
