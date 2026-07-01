@@ -81,6 +81,7 @@ interface Read365SearchResult {
 
 interface Read365ApiResponse {
   status: string;
+  message?: string;
   data?: {
     allTotalCount?: number;
     totalPage?: number;
@@ -117,8 +118,9 @@ export async function searchISBN(
   }
 
   // read365는 페이지 크기 파라미터로 'display'를 사용한다 ('rows'는 무시되어 항상 10개만 반환됨).
-  // display는 최대 100까지만 정상 동작 — 그 이상은 totalPage만 커지고 실제 응답은 100개로 잘려 누락이 발생한다.
-  payload.display = Math.min(pageSize, 100);
+  // display의 유효 최대값은 50 — 그 이상 값(60/80/100)은 서버가 BAD_REQUEST로 거부한다
+  // ("페이지 당 출력건수 값이 유효하지 않습니다"). 100으로 두면 모든 검색이 실패한다.
+  payload.display = Math.min(pageSize, 50);
 
   let lastError: unknown;
 
@@ -156,9 +158,11 @@ export async function searchISBN(
         };
       }
 
-      // 잘못된 ISBN 등 클라이언트 오류는 정상적인 "0건"으로 처리
+      // BAD_REQUEST는 파라미터 오류이므로 재시도해도 동일 실패 — 즉시 throw.
+      // (예전엔 여기서 "0건"으로 조용히 반환해 잘못된 display 값 때문에 모든 검색이 "없음"으로
+      // 나오는 사고가 있었다. 진짜 "잘못된 ISBN"이라도 "없음"보다 오류로 표면화하는 편이 안전.)
       if (data.status === 'BAD_REQUEST') {
-        return { totalCount: 0, totalPages: 0, books: [] };
+        throw new Error(`Read365 BAD_REQUEST: ${data.message || 'unknown'}`);
       }
 
       // 그 외 비정상 status(부하/throttle 등)는 일시 장애로 간주 — 재시도 후 소진 시 throw.
