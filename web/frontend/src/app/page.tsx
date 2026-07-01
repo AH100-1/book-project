@@ -431,6 +431,8 @@ export default function Home() {
         ? null
         : [...selectedRegions].sort();
     const regionCacheKey = regionsArg ? regionsArg.join(",") : "전체";
+    // 결과 사유 문구에 쓸 지역 라벨 (예: "경기", "경기·서울", "전 지역")
+    const regionLabel = regionsArg ? regionsArg.join("·") : "전 지역";
     const getBook = (isbn: string, school: string): Promise<BookCached> => {
       const key = `${regionCacheKey} ${school} ${isbn}`;
       const hit = bookCache.get(key);
@@ -499,9 +501,9 @@ export default function Home() {
               }
             } else {
               if (data.total_count === 0) {
-                reason = "주요 지역에 등록된 도서 없음";
+                reason = `${regionLabel}에 등록된 도서 없음`;
               } else {
-                reason = `${school}에 없음 (타 학교 ${data.total_count}권 보유)`;
+                reason = `${school}에 없음 (${regionLabel} 타 학교 ${data.total_count}권 보유)`;
                 if (candidateCount > 1) {
                   reason += ` - 동일 제목 ${candidateCount}개 버전 존재, 도서명을 더 정확히 입력하세요`;
                 }
@@ -657,16 +659,22 @@ export default function Home() {
           continue;
         }
 
+        // 선택 지역 계산 (사유 문구에도 반영)
+        const manualRegionsArg =
+          selectedRegions.length === 0 || selectedRegions.length === ALL_REGIONS.length
+            ? null
+            : selectedRegions;
+        const manualRegionLabel = manualRegionsArg
+          ? [...manualRegionsArg].sort().join("·")
+          : "전 지역";
+
         const searchRes = await fetch("/api/search/book", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             isbn,
             school: book.school,
-            regions:
-              selectedRegions.length === 0 || selectedRegions.length === ALL_REGIONS.length
-                ? null
-                : selectedRegions,
+            regions: manualRegionsArg,
           }),
         });
 
@@ -699,7 +707,7 @@ export default function Home() {
                         : "not_found",
                     result: searchData.exists
                       ? `✅ ${searchData.matched_school || book.school}에서 발견${multiSchoolWarning}${failedWarning}`
-                      : `❌ ${book.school}에 없음 (${searchData.total_count || 0}권 타학교 보유)${multiVersionWarning}${failedWarning}`,
+                      : `❌ ${book.school}에 없음 (${manualRegionLabel} 타 학교 ${searchData.total_count || 0}권 보유)${multiVersionWarning}${failedWarning}`,
                   }
                 : b
             )
