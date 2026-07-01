@@ -8,7 +8,7 @@ export const maxDuration = 60;
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { isbn, school, region } = body;
+    const { isbn, school, regions } = body;
 
     if (!isbn) {
       return NextResponse.json(
@@ -24,8 +24,12 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // 여러 지역에서 검색 (region 지정 시 우선 검색, 어차피 전 지역을 모두 조회)
-    const { totalCount, books, failedRegions } = await searchISBNMultiRegion(isbn, region || null);
+    // regions 배열이 오면 그 지역들만, 비었으면 전 지역 조회.
+    // (예전 단일 region 필드는 제거 — 클라이언트가 항상 배열로 보냄)
+    const { totalCount, books, failedRegions } = await searchISBNMultiRegion(
+      isbn,
+      Array.isArray(regions) ? regions : null,
+    );
 
     // 특정 학교 도서 찾기
     const { found, matchedSchool, matchedSchools, matchedRegion, matchedPage } = findSchoolBooks(books, school);

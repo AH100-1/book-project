@@ -135,6 +135,13 @@ const COLUMN_ALIASES: Record<string, string[]> = {
   ISBN: ["isbn", "isbn13", "isbn-13", "isbn 13"],
 };
 
+// 지역 목록 (수도권 → 광역시 → 도 순)
+const ALL_REGIONS = [
+  "경기", "서울", "인천",
+  "부산", "대구", "광주", "대전", "울산", "세종",
+  "강원", "충북", "충남", "전북", "전남", "경북", "경남", "제주",
+] as const;
+
 function normalizeHeader(val: string): string {
   return String(val).trim().toLowerCase().replace(/[\s_-]+/g, "");
 }
@@ -232,8 +239,8 @@ export default function Home() {
   const [globalSchoolName, setGlobalSchoolName] = useState("");
   const [hasSchoolColumn, setHasSchoolColumn] = useState(true);
   const [hasISBNColumn, setHasISBNColumn] = useState(false);
-  // 검색 지역 (기본: 경기). "전체"이면 17개 지역 모두 조회.
-  const [selectedRegion, setSelectedRegion] = useState("경기");
+  // 검색 지역 (기본: 경기). 빈 배열이면 전 지역 조회.
+  const [selectedRegions, setSelectedRegions] = useState<string[]>(["경기"]);
 
   const [manualBooks, setManualBooks] = useState<ManualBook[]>([]);
   const [newBook, setNewBook] = useState({
@@ -418,16 +425,20 @@ export default function Home() {
       return p;
     };
 
-    // "전체"는 API에 region 없이 보내서 백엔드가 17지역 모두 조회하도록 한다.
-    const regionArg = selectedRegion === "전체" ? null : selectedRegion;
+    // 선택된 지역 배열. 전 지역이거나 아무것도 선택 안 됐으면 null → 백엔드가 17지역 조회.
+    const regionsArg =
+      selectedRegions.length === 0 || selectedRegions.length === ALL_REGIONS.length
+        ? null
+        : [...selectedRegions].sort();
+    const regionCacheKey = regionsArg ? regionsArg.join(",") : "전체";
     const getBook = (isbn: string, school: string): Promise<BookCached> => {
-      const key = `${regionArg ?? "전체"} ${school} ${isbn}`;
+      const key = `${regionCacheKey} ${school} ${isbn}`;
       const hit = bookCache.get(key);
       if (hit) return hit;
       const p = fetch("/api/search/book", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ isbn, school, region: regionArg }),
+        body: JSON.stringify({ isbn, school, regions: regionsArg }),
       })
         .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
         .then((d) => ({
@@ -652,7 +663,10 @@ export default function Home() {
           body: JSON.stringify({
             isbn,
             school: book.school,
-            region: selectedRegion === "전체" ? null : selectedRegion,
+            regions:
+              selectedRegions.length === 0 || selectedRegions.length === ALL_REGIONS.length
+                ? null
+                : selectedRegions,
           }),
         });
 
@@ -864,35 +878,58 @@ export default function Home() {
                   )}
 
                   <div className="mb-5 p-4 rounded-xl bg-slate-50 ring-1 ring-inset ring-slate-200">
-                    <label className="text-[11px] font-bold text-slate-600 uppercase tracking-wider mb-2 block">
-                      검색 지역
-                    </label>
-                    <select
-                      value={selectedRegion}
-                      onChange={(e) => setSelectedRegion(e.target.value)}
-                      className="w-full bg-white ring-1 ring-slate-200 focus:ring-2 focus:ring-indigo-400 focus:outline-none text-slate-700 text-sm rounded-lg px-3 py-2.5 font-medium transition"
-                    >
-                      <option value="전체">전체 (17개 지역, 느림)</option>
-                      <option value="경기">경기</option>
-                      <option value="서울">서울</option>
-                      <option value="부산">부산</option>
-                      <option value="대구">대구</option>
-                      <option value="인천">인천</option>
-                      <option value="광주">광주</option>
-                      <option value="대전">대전</option>
-                      <option value="울산">울산</option>
-                      <option value="세종">세종</option>
-                      <option value="강원">강원</option>
-                      <option value="충북">충북</option>
-                      <option value="충남">충남</option>
-                      <option value="전북">전북</option>
-                      <option value="전남">전남</option>
-                      <option value="경북">경북</option>
-                      <option value="경남">경남</option>
-                      <option value="제주">제주</option>
-                    </select>
-                    <p className="text-xs text-slate-500 mt-2">
-                      선택한 지역의 학교만 검색합니다. 다른 지역 학교면 "없음"으로 표시됩니다.
+                    <div className="flex items-center justify-between mb-3">
+                      <label className="text-[11px] font-bold text-slate-600 uppercase tracking-wider">
+                        검색 지역 <span className="ml-1 text-slate-500 normal-case tracking-normal">({selectedRegions.length}개 선택)</span>
+                      </label>
+                      <div className="flex gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => setSelectedRegions([...ALL_REGIONS])}
+                          className="px-2.5 py-1 text-[11px] font-semibold rounded-md ring-1 ring-inset ring-slate-200 bg-white text-slate-600 hover:bg-slate-100 transition"
+                        >
+                          모두 선택
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setSelectedRegions([])}
+                          className="px-2.5 py-1 text-[11px] font-semibold rounded-md ring-1 ring-inset ring-slate-200 bg-white text-slate-600 hover:bg-slate-100 transition"
+                        >
+                          모두 해제
+                        </button>
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-4 sm:grid-cols-6 md:grid-cols-9 gap-1.5">
+                      {ALL_REGIONS.map((region) => {
+                        const checked = selectedRegions.includes(region);
+                        return (
+                          <label
+                            key={region}
+                            className={`flex items-center justify-center gap-1.5 px-2 py-2 rounded-lg text-xs font-semibold cursor-pointer transition ring-1 ring-inset ${
+                              checked
+                                ? "bg-indigo-50 text-indigo-700 ring-indigo-300"
+                                : "bg-white text-slate-600 ring-slate-200 hover:bg-slate-100"
+                            }`}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={(e) => {
+                                if (e.target.checked) {
+                                  setSelectedRegions((prev) => [...prev, region]);
+                                } else {
+                                  setSelectedRegions((prev) => prev.filter((r) => r !== region));
+                                }
+                              }}
+                              className="h-3.5 w-3.5 accent-indigo-600"
+                            />
+                            {region}
+                          </label>
+                        );
+                      })}
+                    </div>
+                    <p className="text-xs text-slate-500 mt-2.5">
+                      선택한 지역의 학교만 검색합니다. 아무것도 선택 안 하거나 전부 선택하면 17개 지역 모두 조회(느림).
                     </p>
                   </div>
 
@@ -1054,34 +1091,57 @@ export default function Home() {
                   </div>
                 ))}
               </div>
-              <div className="mb-4">
-                <label className="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-2 block">
-                  검색 지역
-                </label>
-                <select
-                  value={selectedRegion}
-                  onChange={(e) => setSelectedRegion(e.target.value)}
-                  className="w-full md:w-64 bg-white ring-1 ring-inset ring-slate-200 focus:ring-2 focus:ring-indigo-500 focus:outline-none text-slate-800 text-sm rounded-lg px-3 py-2.5 font-medium transition"
-                >
-                  <option value="전체">전체 (17개 지역, 느림)</option>
-                  <option value="경기">경기</option>
-                  <option value="서울">서울</option>
-                  <option value="부산">부산</option>
-                  <option value="대구">대구</option>
-                  <option value="인천">인천</option>
-                  <option value="광주">광주</option>
-                  <option value="대전">대전</option>
-                  <option value="울산">울산</option>
-                  <option value="세종">세종</option>
-                  <option value="강원">강원</option>
-                  <option value="충북">충북</option>
-                  <option value="충남">충남</option>
-                  <option value="전북">전북</option>
-                  <option value="전남">전남</option>
-                  <option value="경북">경북</option>
-                  <option value="경남">경남</option>
-                  <option value="제주">제주</option>
-                </select>
+              <div className="mb-4 p-3 rounded-lg bg-slate-50 ring-1 ring-inset ring-slate-200">
+                <div className="flex items-center justify-between mb-2.5">
+                  <label className="text-[11px] font-bold text-slate-500 uppercase tracking-wider">
+                    검색 지역 <span className="ml-1 text-slate-500 normal-case tracking-normal">({selectedRegions.length}개 선택)</span>
+                  </label>
+                  <div className="flex gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => setSelectedRegions([...ALL_REGIONS])}
+                      className="px-2.5 py-1 text-[11px] font-semibold rounded-md ring-1 ring-inset ring-slate-200 bg-white text-slate-600 hover:bg-slate-100 transition"
+                    >
+                      모두 선택
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedRegions([])}
+                      className="px-2.5 py-1 text-[11px] font-semibold rounded-md ring-1 ring-inset ring-slate-200 bg-white text-slate-600 hover:bg-slate-100 transition"
+                    >
+                      모두 해제
+                    </button>
+                  </div>
+                </div>
+                <div className="grid grid-cols-4 sm:grid-cols-6 md:grid-cols-9 gap-1.5">
+                  {ALL_REGIONS.map((region) => {
+                    const checked = selectedRegions.includes(region);
+                    return (
+                      <label
+                        key={region}
+                        className={`flex items-center justify-center gap-1.5 px-2 py-2 rounded-lg text-xs font-semibold cursor-pointer transition ring-1 ring-inset ${
+                          checked
+                            ? "bg-indigo-50 text-indigo-700 ring-indigo-300"
+                            : "bg-white text-slate-600 ring-slate-200 hover:bg-slate-100"
+                        }`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={(e) => {
+                            if (e.target.checked) {
+                              setSelectedRegions((prev) => [...prev, region]);
+                            } else {
+                              setSelectedRegions((prev) => prev.filter((r) => r !== region));
+                            }
+                          }}
+                          className="h-3.5 w-3.5 accent-indigo-600"
+                        />
+                        {region}
+                      </label>
+                    );
+                  })}
+                </div>
               </div>
               <button
                 onClick={addManualBook}

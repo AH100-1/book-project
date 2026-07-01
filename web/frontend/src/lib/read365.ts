@@ -241,8 +241,7 @@ export async function searchISBNAllPages(
 
 export async function searchISBNMultiRegion(
   isbn: string,
-  primaryRegion?: string | null,
-  maxRegions: number = 17
+  regions?: string[] | null,
 ): Promise<{
   totalCount: number;
   books: Read365Book[];
@@ -250,16 +249,16 @@ export async function searchISBNMultiRegion(
 }> {
   const searchRegions: string[] = [];
 
-  // primaryRegion이 유효한 지역명이면 그 지역만 검색.
-  // (사용자가 UI에서 "경기"만 선택했다면 다른 16개 지역은 조회하지 않음 — 요청 수 17배 감소)
-  const primaryProvCode = primaryRegion ? getProvCode(primaryRegion) : null;
-  if (primaryProvCode) {
-    searchRegions.push(primaryProvCode);
-  } else {
-    // 지역 미지정 또는 매핑 없음 → 전 지역 병렬 조회
-    for (const code of MAJOR_REGION_CODES) {
-      if (searchRegions.length < maxRegions) searchRegions.push(code);
+  // regions에 유효한 지역명 배열이 오면 그 지역들만 검색.
+  // null/빈배열이면 전 지역(17개) 병렬 조회.
+  if (regions && regions.length > 0) {
+    for (const name of regions) {
+      const code = getProvCode(name);
+      if (code && !searchRegions.includes(code)) searchRegions.push(code);
     }
+  }
+  if (searchRegions.length === 0) {
+    for (const code of MAJOR_REGION_CODES) searchRegions.push(code);
   }
 
   // 모든 지역 병렬 검색
