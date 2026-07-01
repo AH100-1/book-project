@@ -250,18 +250,15 @@ export async function searchISBNMultiRegion(
 }> {
   const searchRegions: string[] = [];
 
-  // 지정된 지역 우선
-  if (primaryRegion) {
-    const provCode = getProvCode(primaryRegion);
-    if (provCode) {
-      searchRegions.push(provCode);
-    }
-  }
-
-  // 나머지 주요 지역 추가
-  for (const code of MAJOR_REGION_CODES) {
-    if (!searchRegions.includes(code) && searchRegions.length < maxRegions) {
-      searchRegions.push(code);
+  // primaryRegion이 유효한 지역명이면 그 지역만 검색.
+  // (사용자가 UI에서 "경기"만 선택했다면 다른 16개 지역은 조회하지 않음 — 요청 수 17배 감소)
+  const primaryProvCode = primaryRegion ? getProvCode(primaryRegion) : null;
+  if (primaryProvCode) {
+    searchRegions.push(primaryProvCode);
+  } else {
+    // 지역 미지정 또는 매핑 없음 → 전 지역 병렬 조회
+    for (const code of MAJOR_REGION_CODES) {
+      if (searchRegions.length < maxRegions) searchRegions.push(code);
     }
   }
 

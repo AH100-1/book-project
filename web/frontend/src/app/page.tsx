@@ -232,6 +232,8 @@ export default function Home() {
   const [globalSchoolName, setGlobalSchoolName] = useState("");
   const [hasSchoolColumn, setHasSchoolColumn] = useState(true);
   const [hasISBNColumn, setHasISBNColumn] = useState(false);
+  // 검색 지역 (기본: 경기). "전체"이면 17개 지역 모두 조회.
+  const [selectedRegion, setSelectedRegion] = useState("경기");
 
   const [manualBooks, setManualBooks] = useState<ManualBook[]>([]);
   const [newBook, setNewBook] = useState({
@@ -416,14 +418,16 @@ export default function Home() {
       return p;
     };
 
+    // "전체"는 API에 region 없이 보내서 백엔드가 17지역 모두 조회하도록 한다.
+    const regionArg = selectedRegion === "전체" ? null : selectedRegion;
     const getBook = (isbn: string, school: string): Promise<BookCached> => {
-      const key = `${school} ${isbn}`;
+      const key = `${regionArg ?? "전체"} ${school} ${isbn}`;
       const hit = bookCache.get(key);
       if (hit) return hit;
       const p = fetch("/api/search/book", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ isbn, school }),
+        body: JSON.stringify({ isbn, school, region: regionArg }),
       })
         .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
         .then((d) => ({
@@ -645,7 +649,11 @@ export default function Home() {
         const searchRes = await fetch("/api/search/book", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ isbn, school: book.school }),
+          body: JSON.stringify({
+            isbn,
+            school: book.school,
+            region: selectedRegion === "전체" ? null : selectedRegion,
+          }),
         });
 
         if (searchRes.ok) {
@@ -855,6 +863,40 @@ export default function Home() {
                     </div>
                   )}
 
+                  <div className="mb-5 p-4 rounded-xl bg-slate-50 ring-1 ring-inset ring-slate-200">
+                    <label className="text-[11px] font-bold text-slate-600 uppercase tracking-wider mb-2 block">
+                      검색 지역
+                    </label>
+                    <select
+                      value={selectedRegion}
+                      onChange={(e) => setSelectedRegion(e.target.value)}
+                      className="w-full bg-white ring-1 ring-slate-200 focus:ring-2 focus:ring-indigo-400 focus:outline-none text-slate-700 text-sm rounded-lg px-3 py-2.5 font-medium transition"
+                    >
+                      <option value="전체">전체 (17개 지역, 느림)</option>
+                      <option value="경기">경기</option>
+                      <option value="서울">서울</option>
+                      <option value="부산">부산</option>
+                      <option value="대구">대구</option>
+                      <option value="인천">인천</option>
+                      <option value="광주">광주</option>
+                      <option value="대전">대전</option>
+                      <option value="울산">울산</option>
+                      <option value="세종">세종</option>
+                      <option value="강원">강원</option>
+                      <option value="충북">충북</option>
+                      <option value="충남">충남</option>
+                      <option value="전북">전북</option>
+                      <option value="전남">전남</option>
+                      <option value="경북">경북</option>
+                      <option value="경남">경남</option>
+                      <option value="제주">제주</option>
+                    </select>
+                    <p className="text-xs text-slate-500 mt-2">
+                      선택한 지역의 학교만 검색합니다. 다른 지역 학교면 "없음"으로 표시됩니다.
+                    </p>
+                  </div>
+
+
                   <div className="rounded-xl ring-1 ring-slate-200 overflow-hidden">
                     <div className="overflow-x-auto scroll-slim">
                       <table className="w-full text-sm text-left">
@@ -1011,6 +1053,35 @@ export default function Home() {
                     />
                   </div>
                 ))}
+              </div>
+              <div className="mb-4">
+                <label className="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-2 block">
+                  검색 지역
+                </label>
+                <select
+                  value={selectedRegion}
+                  onChange={(e) => setSelectedRegion(e.target.value)}
+                  className="w-full md:w-64 bg-white ring-1 ring-inset ring-slate-200 focus:ring-2 focus:ring-indigo-500 focus:outline-none text-slate-800 text-sm rounded-lg px-3 py-2.5 font-medium transition"
+                >
+                  <option value="전체">전체 (17개 지역, 느림)</option>
+                  <option value="경기">경기</option>
+                  <option value="서울">서울</option>
+                  <option value="부산">부산</option>
+                  <option value="대구">대구</option>
+                  <option value="인천">인천</option>
+                  <option value="광주">광주</option>
+                  <option value="대전">대전</option>
+                  <option value="울산">울산</option>
+                  <option value="세종">세종</option>
+                  <option value="강원">강원</option>
+                  <option value="충북">충북</option>
+                  <option value="충남">충남</option>
+                  <option value="전북">전북</option>
+                  <option value="전남">전남</option>
+                  <option value="경북">경북</option>
+                  <option value="경남">경남</option>
+                  <option value="제주">제주</option>
+                </select>
               </div>
               <button
                 onClick={addManualBook}
